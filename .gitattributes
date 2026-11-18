@@ -1,0 +1,4 @@
+# Keep line endings as LF on every machine so data/page.json stays byte-identical to the committed replay output.
+* text=auto eol=lf
+*.woff2 binary
+*.png binary

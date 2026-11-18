@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>diamondmetrics: MLB predictions</title>
+<meta name="description" content="MLB game predictions from a Monte Carlo simulation of every game: win chances, first five innings, totals, starter strikeouts, lineups and player props.">
+<meta name="color-scheme" content="light">
+<meta property="og:title" content="diamondmetrics: MLB predictions">
+<meta property="og:description" content="MLB game predictions from a Monte Carlo simulation of every game: win chances, totals, strikeouts, lineups and player props.">
+<meta property="og:type" content="website">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preload" href="fonts/inter-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/space-grotesk-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to the predictions</a>
+
+<header class="top">
+  <nav class="wrap nav" aria-label="Main">
+    <a class="brand" href="#today">diamond<span>metrics</span></a>
+    <div class="links">
+      <a href="#today" aria-current="page">Today</a>
+      <a href="#bts">Beat the Streak</a>
+      <a href="https://github.com/W-Riley-01/mlb-market-engine">About the model</a>
+    </div>
+  </nav>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<main id="main" class="wrap">
+  <div id="today"></div>
+  <div id="app"><p class="msg">Loading predictions…</p></div>
+  <noscript><p class="msg">This page needs JavaScript to show the predictions.</p></noscript>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Predictions come from a Monte Carlo simulation of each game, refreshed through the day. Probabilities, not guarantees; not betting advice.</span>
+    <span>Not affiliated with Major League Baseball</span>
+  </div>
+</footer>
+
+<script src="app.js" defer></script>
+</body>
+</html>
