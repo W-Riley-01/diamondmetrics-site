@@ -234,21 +234,29 @@ def new_ctx(browser, w=1280, h=900, tz="America/New_York"):
     return browser.new_context(viewport={"width": w, "height": h}, timezone_id=tz, locale="en-US", device_scale_factor=1)
 
 
+WS5_API = {"linescore/849799": "linescore-849799.json", "boxscore/849799": "boxscore-849799.json", "series/849799": "series-849799.json"}
+
+
 class Api:
-    """Answers /api/linescore/{gamePk} from a table: a fixture name, an HTTP status (int), or "hang" (never answers).
-    The table can be changed while the page is open; every request is counted per gamePk."""
+    """Answers /api/{linescore,boxscore,series}/{gamePk} from a table keyed "endpoint/gamePk" (a bare gamePk means the
+    line score): a fixture name, an HTTP status (int), or "hang" (never answers). Anything not in the table is a 404.
+    The table can be changed while the page is open. Every request is counted: `calls` lists the line-score requests,
+    `every` all of them as (endpoint, gamePk)."""
 
     def __init__(self, table):
-        self.table = dict(table)
+        self.table = {(k if "/" in k else "linescore/" + k): v for k, v in table.items()}
         self.calls = []
+        self.every = []
 
-    def count(self, pk):
-        return self.calls.count(str(pk))
+    def count(self, pk, ep="linescore"):
+        return self.every.count((ep, str(pk)))
 
     def handle(self, route):
-        pk = route.request.url.rstrip("/").rsplit("/", 1)[-1]
-        self.calls.append(pk)
-        spec = self.table.get(pk, 404)
+        ep, pk = route.request.url.rstrip("/").rsplit("/", 2)[-2:]
+        self.every.append((ep, pk))
+        if ep == "linescore":
+            self.calls.append(pk)
+        spec = self.table.get(ep + "/" + pk, 404)
         if spec == "hang":
             return  # never fulfilled: the page's own timeout has to give up
         if isinstance(spec, int):
@@ -265,8 +273,8 @@ def open_page(ctx, url, fixed="2026-11-18T17:00:00Z", api=None, install=False):
     pg.on("pageerror", lambda e: log["errors"].append(str(e)))
     pg.on("request", lambda r: log["requests"].append(r.url))
     pg.on("response", lambda r: log["responses"].append((r.url, r.status, r.headers)))
-    api = api or Api({"849799": "linescore-849799.json"})
-    pg.route("**/api/linescore/*", api.handle)
+    api = api or Api(WS5_API)
+    pg.route("**/api/*/*", api.handle)
     if install:
         pg.clock.install(time=fixed)
     else:
@@ -394,11 +402,145 @@ def sweep(pg, label):
         check(f"{label} {w}: no scroll wrapper overflows unless its table can't fit", rows and not bad and no_hscroll(pg), bad or rows)
 
 
+DIRT, CHALK, TRACK, POLE_SHADOW = "rgb(217, 195, 160)", "rgb(251, 248, 241)", "rgb(232, 217, 190)", "rgb(242, 193, 46) 4px 0px 0px 0px inset, rgb(242, 193, 46) -4px 0px 0px 0px inset"
+MUTED, OK_GREEN = "rgb(74, 61, 46)", "rgb(26, 94, 55)"
+MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+
+
+def DRANGE(a, b):
+    (_, m1, d1), (_, m2, d2) = (map(int, a.split("-")), map(int, b.split("-")))
+    if (m1, d1) == (m2, d2):
+        return f"{MONTHS[m1 - 1]} {d1}"
+    return f"{MONTHS[m1 - 1]} {d1}–" + ("" if m1 == m2 else MONTHS[m2 - 1] + " ") + str(d2)
+
+
+def SERIES_LINES(g, s):
+    """Expected text of the season series strip, from a /api/series answer."""
+    r, other = s["regular"], {"away": "home", "home": "away"}
+    T = lambda side: NICK[g[side + "_team"]]
+    w = {"away": r["awayWins"], "home": r["homeWins"]}
+    if r["played"] == 0:
+        main = "first meeting"
+    elif w["away"] == w["home"]:
+        main = f"tied {w['away']}–{w['home']}"
+    else:
+        lead = "away" if w["away"] > w["home"] else "home"
+        main = f"{T(lead)} {w[lead]}–{w[other[lead]]}"
+    out = [f"Season series: {main}"]
+    out += [f"{T(sw['winner'])} swept a {sw['games']}-game series, {DRANGE(sw['startDate'], sw['endDate'])}." for sw in r["sweeps"]]
+    if r["seasonSweep"]:
+        W = r["seasonSweep"]
+        out.append(f"{T(W)} swept the season series {w[W]}–0." if r["left"] == 0 else
+                   f"{T(other[W])} haven't beaten the {T(W)} this season (0–{w[W]}, {r['left']} game{'' if r['left'] == 1 else 's'} left).")
+    ps = s["postseason"]
+    if ps:
+        res = ps["result"]
+        score = f"{res['wins']}–{res['losses']}"
+        out.append(f"{ps['description']}: " + (f"{T(res['leader'])} {'win' if res['over'] else 'lead'} {score}." if res["leader"] else f"tied {score}."))
+    return out
+
+
+def plain(s):
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFD", s or "") if unicodedata.category(c) != "Mn").strip().lower()
+
+
+def BATTERY(g, side, box, state):
+    """Expected battery for one team: [SP line and C line (on the board, under the team name),
+    'Started:' note or None and the starter's line stat blocks or None (in the starting pitchers section)]."""
+    p = g["starters"][side]
+    t = box[side] if box else None
+    sp = f"SP {p['name']}" if p else "SP not announced"
+    c = f"C {t['catcher']['name']}" if t and t["catcher"] else "C not announced"
+    started, line = None, None
+    if t and t["pitcher"] and t["pitcher"]["line"]["ip"] is not None and state in ("live", "final"):
+        L = t["pitcher"]["line"]
+        line = [f"IP{L['ip']}", f"H{L['h']}", f"BB{L['bb']}", f"SO{L['so']}"]
+        if not p or plain(t["pitcher"]["name"]) != plain(p["name"]):
+            started = f"Started: {t['pitcher']['name']}"
+    return [sp, c, started, line]
+
+
+BATTERY_JS = """() => {
+    const teams = [...document.querySelectorAll('.bd th.team')], pits = [...document.querySelectorAll('.pit')];
+    const t = (root, s) => { const e = root && root.querySelector(s); return e ? e.textContent.replace(/\\s+/g, ' ').trim() : null; };
+    return [0, 1].map(i => {
+        const line = pits[i] && pits[i].querySelector('.pline');
+        return [t(teams[i], '.bl-sp'), t(teams[i], '.bl-c'), t(pits[i], '.started'),
+                line ? [...line.querySelectorAll('.stats > div')].map(d => d.textContent.trim()) : null];
+    });
+}"""
+
+
+def battery(pg):
+    return pg.evaluate(BATTERY_JS)
+
+
+def strip(pg):
+    """The series strip's lines, or None when it is hidden."""
+    return pg.evaluate("(() => { const s = document.querySelector('.ser'); return !s || s.hidden ? null : [...s.querySelectorAll('p')].map(p => p.textContent.replace(/\\s+/g, ' ').trim()); })()")
+
+
+# WCAG contrast of every visible element with its own text inside .infield whose nearest background is the dirt.
+CONTRAST_JS = """() => {
+    const lin = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+    const lum = c => { const [r, g, b] = c.match(/[\\d.]+/g).slice(0, 3).map(Number).map(lin); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+    const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+    const bgOf = e => { for (let n = e; n; n = n.parentElement) { const b = getComputedStyle(n).backgroundColor; if (b !== 'rgba(0, 0, 0, 0)' && b !== 'transparent') return b; } return null; };
+    const DIRT = 'rgb(217, 195, 160)';
+    const bad = [];
+    let n = 0;
+    for (const e of document.querySelectorAll('.infield *')) {
+        if (e.closest('.sr')) continue;
+        if (![...e.childNodes].some(t => t.nodeType === 3 && t.textContent.trim())) continue;
+        const r = e.getBoundingClientRect();
+        if (!r.width || !r.height) continue;
+        if (bgOf(e) !== DIRT) continue;
+        n += 1;
+        const c = getComputedStyle(e).color, cr = ratio(c, DIRT);
+        if (cr < 4.5) bad.push([e.tagName.toLowerCase() + '.' + e.className, e.textContent.trim().slice(0, 30), c, cr.toFixed(2)]);
+    }
+    return [n, bad];
+}"""
+
+INFIELD_JS = """() => {
+    const i = document.querySelector('.infield'), r = i.getBoundingClientRect(), c = getComputedStyle(i);
+    return { body: getComputedStyle(document.body).backgroundColor, bg: c.backgroundColor, poles: c.boxShadow,
+             left: r.left, width: r.width, client: document.documentElement.clientWidth,
+             navBottom: document.querySelector('.top').getBoundingClientRect().bottom, top: r.top,
+             footerTop: document.querySelector('footer').getBoundingClientRect().top, bottom: r.bottom,
+             holds: i.contains(document.getElementById('banner')) && i.contains(document.querySelector('main')) };
+}"""
+
+BANDS_JS = """() => [...document.querySelectorAll('.infield .sec > h2')].map(h => {
+    const c = getComputedStyle(h), next = h.nextElementSibling;
+    return [h.textContent, c.backgroundColor, c.color, c.borderBottomWidth + ' ' + c.borderBottomStyle + ' ' + c.borderBottomColor, c.padding,
+            next ? Math.round(next.getBoundingClientRect().top - h.getBoundingClientRect().bottom) : 99];
+})"""
+
+
+def check_infield(pg, label):
+    i = pg.evaluate(INFIELD_JS)
+    width = min(1280, i["client"])
+    check(f"{label}: grass sides (body is board green), dirt column, poles 4px yellow on both edges",
+          i["body"] == GREEN and i["bg"] == DIRT and i["poles"] == POLE_SHADOW, i)
+    check(f"{label}: the column is {width}px, centred, holding the banner and main, from the nav to the footer",
+          abs(i["width"] - width) < 1 and abs(i["left"] - (i["client"] - width) / 2) < 1 and i["holds"]
+          and abs(i["top"] - i["navBottom"]) < 1 and abs(i["footerTop"] - i["bottom"]) < 1, i)
+    bands = pg.evaluate(BANDS_JS)
+    check(f"{label}: every section heading on the dirt is a green band with chalk text and at least 12px under it",
+          bands and all(b[1] == GREEN and b[2] == CHALK and b[3] == f"3px solid {CHALK}" and b[4] == "10px 16px 8px" and b[5] >= 12 for b in bands), bands)
+    pg.evaluate("document.querySelectorAll('details').forEach(d => d.open = true)")
+    n, bad = pg.evaluate(CONTRAST_JS)
+    check(f"{label}: every text on the dirt has at least 4.5:1 contrast ({n} elements checked)", n > 20 and not bad, bad[:5])
+    check(f"{label}: no 'null', 'undefined' or 'NaN' written into the page", stray_words(pg) == [], stray_words(pg))
+
+
 # Yellow (#F2C12E) is allowed in exactly these places: strong numbers on the board (.b-strong) and in the tables (.p-strong),
 # the hot home-run bar (.fill.hot), and keyboard focus rings. The brand mark's yellow second base is the logo and is exempt too.
 YELLOW_JS = """() => {
     const Y = '242, 193, 46';
-    const allowed = '.b-strong, .b-strong *, .p-strong, .p-strong *, .fill.hot, .brand .mark, .brand .mark *';
+    const allowed = '.b-strong, .b-strong *, .p-strong, .p-strong *, .fill.hot, .brand .mark, .brand .mark *, .infield';
     return [...document.querySelectorAll('body *')].filter(e => {
         if (e.matches(allowed)) return false;
         const c = getComputedStyle(e);
@@ -413,6 +555,28 @@ YELLOW_JS = """() => {
 def yellow_offenders(pg):
     pg.evaluate("document.activeElement && document.activeElement.blur()")
     return pg.evaluate(YELLOW_JS)
+
+
+def stray_words(pg):
+    """'null', 'undefined' or 'NaN' written into the page: each text node on its own (body.textContent would join
+    neighbouring nodes, so a stray "null" next to "IP" reads "nullIP" and slips past a word boundary), plus the
+    aria-label, title and alt attributes. Screen-reader text is included."""
+    return pg.evaluate("""(() => {
+        const bad = /^(null|undefined|NaN)$|\\b(null|undefined|NaN)\\b/;
+        const out = [];
+        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        for (let n = w.nextNode(); n; n = w.nextNode()) {
+            const t = n.nodeValue.trim();
+            if (t && bad.test(t)) out.push('text in ' + (n.parentElement ? n.parentElement.tagName.toLowerCase() + '.' + n.parentElement.className : '?') + ': ' + JSON.stringify(t));
+        }
+        for (const a of ['aria-label', 'title', 'alt']) {
+            for (const e of document.body.querySelectorAll('[' + a + ']')) {
+                const v = e.getAttribute(a).trim();
+                if (bad.test(v)) out.push(a + ' on ' + e.tagName.toLowerCase() + ': ' + JSON.stringify(v));
+            }
+        }
+        return out;
+    })()""")
 
 
 def plate_tops_aligned(pg):
@@ -451,7 +615,7 @@ def test_real(browser, base):
     check("real: every request is same-origin", all(u.startswith(origin) for u in log["requests"]), [u for u in log["requests"] if not u.startswith(origin)])
     check("real: every static response has the CSP header", all("content-security-policy" in h for u, _, h in log["responses"] if "/api/" not in u))
     check("real: no failed responses", all(s < 400 for _, s, _ in log["responses"]), [(u, s) for u, s, _ in log["responses"] if s >= 400])
-    check("real: the line score is requested once, for the WS5 game", pg.api.calls == ["849799"], pg.api.calls)
+    check("real: each endpoint is requested once, for the WS5 game", sorted(pg.api.every) == [("boxscore", "849799"), ("linescore", "849799"), ("series", "849799")], pg.api.every)
     fonts_loaded = sorted(u.rsplit("/", 1)[1] for u in log["requests"] if u.endswith(".woff2"))
     check("real: both self-hosted fonts requested", fonts_loaded == ["big-shoulders-latin-wght-normal.woff2", "libre-franklin-latin-wght-normal.woff2"], fonts_loaded)
     check("real: fonts actually usable", pg.evaluate("document.fonts.check('800 20px \"Big Shoulders\"') && document.fonts.check('16px \"Libre Franklin\"')"))
@@ -491,14 +655,31 @@ def test_real(browser, base):
     check("line score: inning plates about 34x40 with 28px numerals; R, H, E larger", sz[:2] == [34, 40] and sz[2] > sz[0] and sz[3] > sz[1] and sz[4] == 28, sz)
     check("line score: R set off by a 2px seam", css(pg, ".ls tbody td.rhe.first", "borderLeftWidth") == "2px" and css(pg, ".ls tbody td.rhe.first", "borderLeftColor") == "rgb(43, 91, 70)")
     check("line score: no current-inning outline on a final", pg.locator(".ls .ip.cur").count() == 0)
+
+    # ---------- the board: season series strip ----------
+    ser = fixture("series-849799.json")
+    check("series fixture: WS5 regular season Brewers 2-1 (3 played, none left), World Series 4-1",
+          ser["regular"] == {"awayWins": 2, "homeWins": 1, "played": 3, "left": 0, "sweeps": [], "seasonSweep": None}
+          and ser["postseason"]["result"] == {"leader": "away", "wins": 4, "losses": 1, "over": True}, ser)
+    check("series strip: WS5 lines", strip(pg) == SERIES_LINES(g, ser) == ["Season series: Brewers 2–1", "World Series: Brewers win 4–1."], (strip(pg), SERIES_LINES(g, ser)))
+    check("series strip: between the line score and the model section", pg.evaluate("(() => { const s = document.querySelector('.ser'); return s.previousElementSibling.classList.contains('ls-scroll') && s.nextElementSibling.classList.contains('model'); })()"))
+    check("series strip: 15px #F4F5F0 under a 2px #2B5B46 rule, labels #C9D6CE",
+          [css(pg, ".ser", "fontSize"), css(pg, ".ser", "color"), css(pg, ".ser", "borderTopWidth"), css(pg, ".ser", "borderTopColor"), css(pg, ".ser .lab", "color")]
+          == ["15px", WHITE, "2px", "rgb(43, 91, 70)", "rgb(201, 214, 206)"])
+    check("series strip: the labels are 'Season series:' and 'World Series:'", tc(pg, ".ser .lab") == ["Season series:", "World Series:"], tc(pg, ".ser .lab"))
     check("board: model section below a 2px #2B5B46 rule", css(pg, ".board .model", "borderTopWidth") == "2px" and css(pg, ".board .model", "borderTopColor") == "rgb(43, 91, 70)")
 
     # ---------- the board: model numbers ----------
     heads = tc(pg, ".bd thead th")
     check("board: column headers (no Final column)", heads == ["Team", "Odds to win", "First 5 winner", "Total runs O/U"], heads)
     check("board: caption, column and row headers", pg.locator(".bd caption").count() == 1 and pg.locator(".bd th[scope=col]").count() == 4 and pg.locator(".bd th[scope=row]").count() == 2)
-    teams = [tc(pg, ".bd th.team .nick"), tc(pg, ".bd th.team .pitch")]
-    check("board: team cells (nickname + starter's last name)", teams == [["Brewers", "Rays"], ["Misiorowski pitching", "Rasmussen pitching"]], teams)
+    teams = [tc(pg, ".bd th.team .nick"), tc(pg, ".bd th.team .bl-sp"), tc(pg, ".bd th.team .bl-c")]
+    check("board: team cells (nickname, then SP from page.json and C from the boxscore)",
+          teams == [["Brewers", "Rays"], ["SP Jacob Misiorowski", "SP Drew Rasmussen"], ["C William Contreras", "C Liam Hicks"]], teams)
+    check("board: no 'pitching' line any more", "pitching" not in pg.evaluate("document.querySelector('.board').textContent"))
+    check("board: SP and C labels #C9D6CE, names #F4F5F0, 14px like the old pitcher line",
+          [css(pg, ".bd .bl-sp .pos", "color"), css(pg, ".bd .bl-c .pos", "color"), css(pg, ".bd .bl-sp .who", "color"), css(pg, ".bd .bl-c .who", "color"), css(pg, ".bd .bl-sp", "fontSize"), css(pg, ".bd .bl-c", "fontSize")]
+          == ["rgb(201, 214, 206)", "rgb(201, 214, 206)", WHITE, WHITE, "14px", "14px"])
     ou_labels, ou_vals = OU(m["total_over"])
     check("board O/U: WS5 picks the 6.5 line (over chance 0.546, closest to 50%)", ou_labels == ["Over 6.5", "Under 6.5"] and ou_vals == ["55%", "45%"], (ou_labels, ou_vals))
     for i, side in enumerate(("away", "home")):
@@ -547,8 +728,11 @@ def test_real(browser, base):
     check("totals: no check marks (5 runs went over none of the lines)", pg.locator(".tot svg").count() == over == 0)
 
     # ---------- pitchers ----------
-    check("battery: heading on the replay", tc(pg, ".pitchers h2") == ["Battery"], tc(pg, ".pitchers h2"))
-    check("pitchers: sub line", tc(pg, ".pitchers .subl") == ["Chance each starter reaches a strikeout total."], tc(pg, ".pitchers .subl"))
+    check("pitchers: heading 'Starting pitchers' on the replay", tc(pg, ".pitchers h2") == ["Starting pitchers"], tc(pg, ".pitchers h2"))
+    check("pitchers: no 'Battery' heading and no sub line", pg.locator(".pitchers .subl").count() == 0
+          and not any(w in pg.evaluate("document.body.textContent") for w in ("Battery", "battery", "Chance each starter reaches a strikeout total.")))
+    check("pitchers: no SP or C lines in the section (they are on the board)", pg.locator(".pit .bl, .pit .pos").count() == 0
+          and not any(t.startswith(("SP ", "C ")) for t in tc(pg, ".pit div, .pit p")))
     check("battery: no median or 'Threw' line", pg.locator(".pit .ks").count() == 0 and "Threw" not in pg.evaluate("document.querySelector('.pitchers').textContent"))
     kou_ws5 = [KOU(g["starters"][s]["k_over"]) for s in ("away", "home")]
     check("battery: WS5 strikeout lines worked out in the test (Misiorowski 6.5, Rasmussen 5.5, both 50/50)",
@@ -560,7 +744,7 @@ def test_real(browser, base):
         blk = pits.nth(i)
         t = lambda sel: [norm(x) for x in blk.locator(sel).all_text_contents()]
         threw = res["starter_k"][side]
-        check(f"pitchers {side}: team and name", t(".who") == [NICK[g[side + "_team"]]] and t(".nm") == [p["name"]], (t(".who"), t(".nm")))
+        check(f"pitchers {side}: team and starter's name", t(".who") == [NICK[g[side + "_team"]]] and t(".nm") == [p["name"]], (t(".who"), t(".nm")))
         check(f"battery {side}: strikeout O/U", t(".kou-l") + t(".kou-v > span") == KOU(p["k_over"]), (t(".kou-l") + t(".kou-v > span"), KOU(p["k_over"])))
         ks = sorted(p["k_over"], key=int)
         check(f"pitchers {side}: ladder labels", t(".rung .l") == [f"{k}+ K" for k in ks], t(".rung .l"))
@@ -571,8 +755,17 @@ def test_real(browser, base):
         check(f"pitchers {side}: check under each total reached", marks == [threw >= int(k) for k in ks], marks)
         check(f"pitchers {side}: check marks carry words", t(".rung .ck") == [("reached" if threw >= int(k) else "") for k in ks], t(".rung .ck"))
         exp_fi = fi_expect(p["first_inning"])
-        check(f"pitchers {side}: first-inning label and stat blocks (no WHIP in the data)", t(".fi-l") == ["First inning"] and t(".stats > div") == exp_fi and len(exp_fi) == 3, (t(".stats > div"), exp_fi))
+        check(f"pitchers {side}: first-inning label and stat blocks (no WHIP in the data)", t(".fi-l") == ["First inning"] and t(".fi .stats > div") == exp_fi and len(exp_fi) == 3, (t(".fi .stats > div"), exp_fi))
     check("pitchers: Rasmussen's 3+ and 4+ checked, nothing for Misiorowski", pits.nth(0).locator("svg").count() == 0 and pits.nth(1).locator("svg").count() == 2)
+    box = fixture("boxscore-849799.json")
+    check("boxscore fixture: WS5 starters' lines and catchers from the real API (strikeouts match page.json)",
+          [box[s]["pitcher"]["line"]["so"] for s in ("away", "home")] == [res["starter_k"]["away"], res["starter_k"]["home"]]
+          and [box[s]["catcher"]["name"] for s in ("away", "home")] == ["William Contreras", "Liam Hicks"], box)
+    exp_b = [BATTERY(g, s, box, "final") for s in ("away", "home")]
+    check("battery: WS5 SP and C on the board, and each starter's line (IP, H, BB, SO) in the section",
+          battery(pg) == exp_b == [["SP Jacob Misiorowski", "C William Contreras", None, ["IP5.2", "H2", "BB1", "SO2"]],
+                                   ["SP Drew Rasmussen", "C Liam Hicks", None, ["IP4.0", "H2", "BB0", "SO4"]]], (battery(pg), exp_b))
+    check("battery: the starter's line sits under the strikeout O/U", pg.evaluate("[...document.querySelectorAll('.pit')].every(b => b.querySelector('.kou').compareDocumentPosition(b.querySelector('.pline')) & Node.DOCUMENT_POSITION_FOLLOWING)"))
 
     # ---------- lineups: every cell, every chip class, every check ----------
     check("lineups: no sub line", pg.locator(".lineups .subl").count() == 0)
@@ -607,10 +800,10 @@ def test_real(browser, base):
     check("lineups: WS5 has 13 Brewers icons and 6 Rays icons, the same counts as the old checks", (exp_checks["away"], exp_checks["home"]) == (13, 6), exp_checks)
     ic = pg.evaluate("""[...document.querySelectorAll('table.t svg')].map(s => { const c = getComputedStyle(s.querySelector('path, circle'));
         return [s.getAttribute('role'), s.getAttribute('width'), s.getAttribute('height'), c.fill !== 'none' ? c.fill : c.stroke, s.closest('.ck') !== null, s.getAttribute('aria-hidden')]; })""")
-    check("lineups: icons are 14px #2E7A4F images with labels, in the check slot", ic and all(x == ["img", "14", "14", "rgb(46, 122, 79)", True, None] for x in ic), ic[:3])
+    check("lineups: icons are 14px images in --ok (#1A5E37) with labels, in the check slot", ic and all(x == ["img", "14", "14", OK_GREEN, True, None] for x in ic), ic[:3])
     bat = pg.evaluate("""(() => { const s = [...document.querySelectorAll('table.t svg')].find(x => x.getAttribute('aria-label') === 'got a hit'), p = s.querySelector('path'), c = getComputedStyle(p);
         return [s.children.length, c.fill, c.stroke, p.getAttribute('transform')]; })()""")
-    check("lineups: the bat is one filled, tapered shape on the diagonal (not a stroked line)", bat == [1, "rgb(46, 122, 79)", "none", "translate(8 8) rotate(-45)"], bat)
+    check("lineups: the bat is one filled, tapered shape on the diagonal (not a stroked line)", bat == [1, OK_GREEN, "none", "translate(8 8) rotate(-45)"], bat)
     kinds = sorted({l for side in ("away", "home") for row in lineup_expect(g, side, by_id)[1] for l in row})
     shown = sorted(set(pg.evaluate("[...document.querySelectorAll('table.t svg')].map(s => s.getAttribute('aria-label'))")))
     check("lineups: WS5 shows the icon kinds its box score calls for (no homers that night)", shown == kinds == sorted(set(ICON_LABEL.values()) - {"homered"}), (shown, kinds))
@@ -628,14 +821,18 @@ def test_real(browser, base):
     check("BTS: stat lines from the box score", tc(pg, ".bts .line") == exp_lines, (tc(pg, ".bts .line"), exp_lines))
     check("BTS: team 14px muted, line 14px ink semibold after a 10px gap",
           [css(pg, ".bts .meta", "fontSize"), css(pg, ".bts .meta", "color"), css(pg, ".bts .line", "fontSize"), css(pg, ".bts .line", "color"), css(pg, ".bts .line", "fontWeight"), css(pg, ".bts .line", "marginLeft")]
-          == ["14px", "rgb(78, 95, 86)", "14px", "rgb(19, 36, 28)", "600", "10px"])
+          == ["14px", MUTED, "14px", "rgb(19, 36, 28)", "600", "10px"])
     check("BTS: hit chances", tc(pg, ".bts .p") == [PCT(p["hit"]) for p in picks], tc(pg, ".bts .p"))
     check("BTS: chip classes", classes(pg, ".bts .p") == [f"p {TIER(p['hit'], 'hit')}" for p in picks], classes(pg, ".bts .p"))
     check("BTS: section is the #bts anchor", pg.locator("section#bts h2").count() == 1)
 
     # ---------- cut-offs ----------
     check("cut-offs: its own disclosure right under Beat the Streak", pg.evaluate("document.querySelector('#bts').nextElementSibling.matches('details.how')"))
-    check("cut-offs: 3px board-green top rule", css(pg, ".how", "borderTopWidth") == "3px" and css(pg, ".how", "borderTopColor") == GREEN)
+    check("cut-offs: 3px chalk top rule", css(pg, ".how", "borderTopWidth") == "3px" and css(pg, ".how", "borderTopColor") == CHALK)
+    check("chalk: table header rules 2px chalk, battery top rules 3px chalk, row rules --rule",
+          [css(pg, ".t th", "borderBottom"), css(pg, ".how th", "borderBottom"), css(pg, ".pit", "borderTop"), css(pg, ".t td", "borderBottomColor"), css(pg, ".bts li", "borderBottomColor"), css(pg, ".fi", "borderTopColor")]
+          == [f"2px solid {CHALK}", f"2px solid {CHALK}", f"3px solid {CHALK}", "rgb(239, 227, 204)", "rgb(239, 227, 204)", "rgb(239, 227, 204)"])
+    check("bars: chalked lanes (--track) with the fill in --bar", css(pg, ".bar", "backgroundColor") == TRACK and css(pg, ".track", "backgroundColor") == TRACK and css(pg, ".bar-fill", "backgroundColor") == "rgb(46, 107, 79)")
     ind = "() => { const s = document.querySelector('.how summary'), b = getComputedStyle(s, '::before'); return [b.content, b.borderLeftWidth, b.transform, s.getBoundingClientRect().height >= 44]; }"
     closed = pg.evaluate(ind)
     check("cut-offs: summary shows an open indicator, 44px tall", closed[0] == '""' and closed[1] == "8px" and closed[2] == "none" and closed[3], closed)
@@ -684,6 +881,8 @@ def test_real(browser, base):
     pg.set_viewport_size({"width": 1440, "height": 900})
     settle(pg, 150)
     pg.evaluate("document.activeElement.blur()")
+    check_infield(pg, "infield 1440")
+    pg.evaluate("document.querySelectorAll('details').forEach(d => d.open = false)")
     screenshot(pg, "replay-1440.png")
     ctx.close()
 
@@ -709,23 +908,44 @@ def test_real(browser, base):
     check("phone 390: plates line up at the top", plate_tops_aligned(pg))
     check("phone 390: plates inside the board", pg.evaluate("(() => { const b = document.querySelector('.board').getBoundingClientRect(); return [...document.querySelectorAll('.board .plate, .board .ip')].every(p => p.getBoundingClientRect().right <= b.right); })()"))
     check("phone 390: team names on one line", pg.evaluate("[...document.querySelectorAll('.nick')].every(n => n.getBoundingClientRect().height < parseFloat(getComputedStyle(n).fontSize) * 1.5)"))
+    check_infield(pg, "infield 390")
+    pg.evaluate("document.querySelectorAll('details').forEach(d => d.open = false)")
     screenshot(pg, "replay-390.png")
     ctx.close()
 
     # ---------- the score can't be fetched: same empty board, the rest of the page intact ----------
     for label, spec in (("500", 500), ("timeout", "hang")):
         ctx = new_ctx(browser)
-        pg, log = open_page(ctx, base, api=Api({"849799": spec}), install=True)
+        pg, log = open_page(ctx, base, api=Api({"linescore/849799": spec, "boxscore/849799": spec, "series/849799": spec}), install=True)
         pg.wait_for_selector(".board")
         if spec == "hang":
             adv(pg, 10500)  # the page gives up after 10 seconds
         settle(pg, 300)
-        check(f"line score {label}: empty plates and dashes, no error banner", ls_rows(pg) == LS(None, "MIL", "TB") and pg.locator("[role=alert]").count() == 0, ls_rows(pg))
-        check(f"line score {label}: the rest of the page is unaffected",
+        check(f"all endpoints {label}: empty plates and dashes, no error banner", ls_rows(pg) == LS(None, "MIL", "TB") and pg.locator("[role=alert]").count() == 0, ls_rows(pg))
+        check(f"all endpoints {label}: no series strip, catchers not announced, no starter's line, page.json starters kept",
+              strip(pg) is None and battery(pg) == [BATTERY(g, s, None, "final") for s in ("away", "home")]
+              and battery(pg)[0] == ["SP Jacob Misiorowski", "C not announced", None, None], battery(pg))
+        check(f"all endpoints {label}: the rest of the page is unaffected",
               tc(pg, "h1") == [site_json["replay_title"]] and pg.locator(".bd .plate").count() == 6 and pg.locator("table.t tbody tr").count() == 18
-              and pg.locator(".bts li").count() == 5 and tc(pg, ".bd-where") == ["Tropicana Field. Wednesday, October 28, 2026."])
-        check(f"line score {label}: no page errors", not log["errors"], log["errors"])
+              and pg.locator(".bts li").count() == 5 and tc(pg, ".bd-where") == ["Tropicana Field. Wednesday, October 28, 2026."]
+              and pg.locator(".pit .kou").count() == 2 and pg.locator(".lr li").count() == 4)
+        check(f"all endpoints {label}: no page errors", not log["errors"], log["errors"])
         ctx.close()
+    # only one endpoint failing leaves the others in place
+    ctx = new_ctx(browser)
+    pg, log = open_page(ctx, base, api=Api({**WS5_API, "boxscore/849799": 500}))
+    pg.wait_for_selector(".ser:not([hidden])")
+    settle(pg, 300)
+    check("boxscore 500 alone: line score and series strip still shown, battery from page.json only",
+          ls_rows(pg) == LS(ws5, "MIL", "TB") and strip(pg) == SERIES_LINES(g, fixture("series-849799.json")) and [b[1:] for b in battery(pg)] == [["C not announced", None, None]] * 2, battery(pg))
+    ctx.close()
+    ctx = new_ctx(browser)
+    pg, log = open_page(ctx, base, api=Api({**WS5_API, "series/849799": 500}))
+    pg.wait_for_selector(".pline")
+    settle(pg, 300)
+    check("series 500 alone: the strip stays hidden; line score and battery still shown",
+          strip(pg) is None and pg.locator(".ser[hidden]").count() == 1 and ls_rows(pg) == LS(ws5, "MIL", "TB") and battery(pg)[0][1] == "C William Contreras", strip(pg))
+    ctx.close()
 
     # ---------- timezone: the game date must not shift for a viewer far from the US ----------
     ctx = new_ctx(browser, tz="Pacific/Auckland")
@@ -810,7 +1030,9 @@ def season_data():
     return {"date": "2026-04-14", "updated_at": "2026-04-14T15:00:00Z", "model_version": "v4", "note": "live", "games": [g1, g2, g3], "beat_the_streak": picks}
 
 
-SEASON_API = {"1001": "linescore-preview.json", "1002": "linescore-live.json", "1003": "linescore-final-11.json"}
+SEASON_API = {"1001": "linescore-preview.json", "1002": "linescore-live.json", "1003": "linescore-final-11.json",
+              "boxscore/1001": "boxscore-preview.json", "boxscore/1002": "boxscore-live.json", "boxscore/1003": "boxscore-final-opener.json",
+              "series/1001": "series-first.json", "series/1002": "series-tied.json", "series/1003": "series-season-sweep.json"}
 
 
 def board_plates(pg):
@@ -867,7 +1089,8 @@ def test_season(browser):
         check("season: game buttons at least 44px tall", pg.evaluate("[...document.querySelectorAll('.gm')].every(b => b.getBoundingClientRect().height >= 44)"))
         mini_cls = classes(pg, ".gm .mini")
         check("season: button win chances carry the board tier", mini_cls == [f"mini {BT(g['markets'][k], 'ml')}" for g in (g1, g2, g3) for k in ("away_win", "home_win")], mini_cls)
-        check("season: only the selected game's line score is requested", pg.api.calls == ["1001"], pg.api.calls)
+        check("season: only the selected game is requested, once from each endpoint on first load (hours before the preview window)",
+              sorted(pg.api.every) == [("boxscore", "1001"), ("linescore", "1001"), ("series", "1001")], pg.api.every)
 
         # BTS: team nickname; a stat line only where a final box score has the player (game_id picks the game)
         exp_lines = [pick_line(p, d["games"]) for p in d["beat_the_streak"]]
@@ -884,14 +1107,20 @@ def test_season(browser):
         l1, v1 = OU(g1["markets"]["total_over"])
         check("season game 1: board numbers", board_plates(pg) == [[PCT(g1["markets"]["away_win"]), PCT(g1["markets"]["f5_away"]), v1[0]], [PCT(g1["markets"]["home_win"]), PCT(g1["markets"]["f5_home"]), v1[1]]], board_plates(pg))
         check("season game 1: O/U captions", tc(pg, ".bd .cap") == l1, tc(pg, ".bd .cap"))
-        check("season: battery heading in season", tc(pg, ".pitchers h2") == ["Today's battery"], tc(pg, ".pitchers h2"))
+        check("season: heading 'Starting pitchers' in season too, no sub line", tc(pg, ".pitchers h2") == ["Starting pitchers"] and pg.locator(".pitchers .subl").count() == 0
+              and "battery" not in pg.evaluate("document.body.textContent").lower(), tc(pg, ".pitchers h2"))
+        bx1 = fixture("boxscore-preview.json")
+        check("season game 1: the catcher shows before the game; 'C not announced' where the lineup isn't in; no line yet",
+              battery(pg) == [BATTERY(g1, s, bx1, "preview") for s in ("away", "home")] == [["SP Jacob Misiorowski", "C not announced", None, None], ["SP Drew Rasmussen", "C Connor Wong", None, None]], battery(pg))
+        check("season game 1: no 'null', 'undefined' or 'NaN' in the page", stray_words(pg) == [], stray_words(pg))
+        check("season game 1: first meeting", strip(pg) == SERIES_LINES(g1, fixture("series-first.json")) == ["Season series: first meeting"], strip(pg))
         check("season game 1: four unlit lamps before the game, no screen-reader verdict", lamps(pg) == lamps_expect(g1) and [s for _, s, _ in lamps(pg)] == ["unlit"] * 4, (lamps(pg), lamps_expect(g1)))
         check("season game 1: unlit lamps are plate green with the seam ring", set(pg.evaluate("[...document.querySelectorAll('.lr .lamp')].map(l => getComputedStyle(l).backgroundColor + ' ' + getComputedStyle(l).boxShadow)")) == {f"{UNLIT} rgb(43, 91, 70) 0px 0px 0px 2px inset"}, pg.evaluate("[...document.querySelectorAll('.lr .lamp')].map(l => getComputedStyle(l).boxShadow)"))
         check("season game 1: dew point by Magnus is 47°F", DEW(61.4, 58) == 47)
         check("season game 1: Fenway's 6 m is 20 ft", FT(ELEV_M["BOS"]) == 20)
         wx = tc(pg, ".wx > div")
         check("season game 1: six readings, computed dew point and elevation", wx == readings(g1["weather"], "BOS"), (wx, readings(g1["weather"], "BOS")))
-        check("season game 1: no pressure, wind note 13px muted under the wind", "Pressure" not in " ".join(wx) and tc(pg, ".wx .note") == ["Out to CF (7 mph)"] and css(pg, ".wx .note", "fontSize") == "13px" and css(pg, ".wx .note", "color") == "rgb(78, 95, 86)")
+        check("season game 1: no pressure, wind note 13px muted under the wind", "Pressure" not in " ".join(wx) and tc(pg, ".wx .note") == ["Out to CF (7 mph)"] and css(pg, ".wx .note", "fontSize") == "13px" and css(pg, ".wx .note", "color") == MUTED)
         check("season game 1: bar label without the heading's words, hot bar", tc(pg, ".hrbox .hrrow > *") == ["HR Friendly", "63 out of 100"] and pg.locator(".fill.hot").count() == 1, tc(pg, ".hrbox .hrrow > *"))
         check("season game 1: the hot HR bar (63) stays yellow", css(pg, ".fill.hot", "backgroundColor") == YELLOW)
         check("season game 1 (preview, hot bar): yellow only on strong numbers, the hot HR bar and focus rings", yellow_offenders(pg) == [], yellow_offenders(pg))
@@ -917,8 +1146,9 @@ def test_season(browser):
         check("season game 2: O/U tie goes to the higher line (8.5, over 45, under 55)", l2 == ["Over 8.5", "Under 8.5"] and v2 == ["45%", "55%"] and tc(pg, ".bd .cap") == l2, (l2, v2, tc(pg, ".bd .cap")))
         check("season game 2: board numbers changed to game 2", board_plates(pg) != g1_plates and board_plates(pg) == [[PCT(0.4123), PCT(0.3041), v2[0]], [PCT(0.5877), PCT(0.5512), v2[1]]], board_plates(pg))
         check("season game 2: plate tiers follow the new numbers", classes(pg, ".bd tbody tr >> nth=1 >> .plate") == [f"plate {BT(0.5877, 'ml')}", f"plate {BT(0.5512, 'f5')}", "plate b-plain"], classes(pg, ".bd tbody tr >> nth=1 >> .plate"))
-        teams = [tc(pg, ".bd th.team .nick"), tc(pg, ".bd th.team .pitch")]
-        check("season game 2: starter not announced on the board", teams == [["Athletics", "Mariners"], ["Starter not announced", "Rasmussen pitching"]], teams)
+        teams = [tc(pg, ".bd th.team .nick"), tc(pg, ".bd th.team .bl-sp"), tc(pg, ".bd th.team .bl-c")]
+        check("season game 2: starter not announced on the board, catchers from the boxscore",
+              teams == [["Athletics", "Mariners"], ["SP not announced", "SP Drew Rasmussen"], ["C Shea Langeliers", "C Cal Raleigh"]], teams)
         check("season game 2: unlit lamps while live (Mariners, Mariners, Under 8.5, NRFI)", lamps(pg) == lamps_expect(g2) and [s for _, s, _ in lamps(pg)] == ["unlit"] * 4
               and [t for t, _, _ in lamps(pg)] == ["Winner Mariners", "First 5 Mariners", "Total Under 8.5", "NRFI 62%"], lamps(pg))
         check("season game 2: strikeout tie goes to the higher line (5.5, over 45, under 55)",
@@ -926,7 +1156,13 @@ def test_season(browser):
               and tc(pg, ".pit .kou-l") + tc(pg, ".pit .kou-v > span") == KOU(g2["starters"]["home"]["k_over"]), tc(pg, ".pit .kou"))
         check("season game 2: forecast missing message under the new heading", tc(pg, ".cond h2") == ["Home run conditions"] and tc(pg, ".cond-note") == ["The forecast for this park was not available when the prediction ran."], tc(pg, ".cond-note"))
         pits = tc(pg, ".pit")
-        check("season game 2: starter not announced + first-inning fallback", "Starter not announced" in pits[0] and tc(pg, ".fi-none") == ["First-inning record not shown (fewer than 5 starts)."] and pg.locator(".stats").count() == 0, pits)
+        check("season game 2: starter not announced + first-inning fallback", tc(pg, ".pit .nm") == ["Starter not announced", "Drew Rasmussen"] and tc(pg, ".fi-none") == ["First-inning record not shown (fewer than 5 starts)."] and pg.locator(".fi .stats").count() == 0, pits)
+        bx2 = fixture("boxscore-live.json")
+        check("season game 2: live lines; the actual starter is named where page.json had none",
+              battery(pg) == [BATTERY(g2, s, bx2, "live") for s in ("away", "home")]
+              == [["SP not announced", "C Shea Langeliers", "Started: JP Sears", ["IP5.1", "H4", "BB2", "SO6"]], ["SP Drew Rasmussen", "C Cal Raleigh", None, ["IP6.0", "H3", "BB1", "SO7"]]], battery(pg))
+        check("season game 2 (live lines, a 'Started:' note): no 'null', 'undefined' or 'NaN' in the page", stray_words(pg) == [], stray_words(pg))
+        check("season game 2: tied series", strip(pg) == SERIES_LINES(g2, fixture("series-tied.json")) == ["Season series: tied 1–1"], strip(pg))
 
         # game 3: an 11-inning final, file dew point and elevation, WHIP
         pg.click(".gm >> nth=2")
@@ -940,6 +1176,13 @@ def test_season(browser):
         l3, v3 = OU(g3["markets"]["total_over"])
         check("season game 3: O/U line 8.5 (0.52), over 52 and under 48", l3 == ["Over 8.5", "Under 8.5"] and v3 == ["52%", "48%"] and tc(pg, ".bd .cap") == l3 and [p[2] for p in board_plates(pg)] == v3, (l3, v3, board_plates(pg)))
         check("season game 3: no 'led after 5' caption any more", "led after 5" not in tc(pg, ".board"))
+        bx3 = fixture("boxscore-final-opener.json")
+        check("season game 3: an opener started for the Red Sox, so his line is labelled 'Started: Kevin Kelly'",
+              battery(pg) == [BATTERY(g3, s, bx3, "final") for s in ("away", "home")]
+              == [["SP Jacob Misiorowski", "C Austin Wells", None, ["IP6.0", "H5", "BB2", "SO8"]], ["SP Drew Rasmussen", "C Carlos Narváez", "Started: Kevin Kelly", ["IP1.0", "H0", "BB0", "SO1"]]], battery(pg))
+        check("season game 3 (final lines, an opener): no 'null', 'undefined' or 'NaN' in the page", stray_words(pg) == [], stray_words(pg))
+        check("season game 3: completed season sweep and its series sweep",
+              strip(pg) == SERIES_LINES(g3, fixture("series-season-sweep.json")) == ["Season series: Red Sox 3–0", "Red Sox swept a 3-game series, June 30–July 2.", "Red Sox swept the season series 3–0."], strip(pg))
         check("season game 3: lamps graded on page.json (Yankees won: green; Red Sox led after 5: red; 11 runs over 8.5: green; a run in the 1st: red)",
               lamps(pg) == lamps_expect(g3) and [x[:2] for x in lamps(pg)] == [("Winner Yankees", "hit"), ("First 5 Yankees", "miss"), ("Total Over 8.5", "hit"), ("NRFI 55%", "miss")], lamps(pg))
         by3 = {r["id"]: r for s in ("away", "home") for r in g3["results"]["batters"][s]}
@@ -951,7 +1194,7 @@ def test_season(browser):
         check("season game 3: the five icons are five different drawings", len(shapes) == 5 and len(set(shapes.values())) == 5, shapes)
         wx3 = tc(pg, ".wx > div")
         check("season game 3: the file's dew point and elevation win", wx3 == readings(g3["weather"], "BOS") and "Dew point51°F" in wx3 and "Elevation5,204 ft" in wx3, wx3)
-        st3 = [[norm(x) for x in pg.locator(".pit").nth(i).locator(".stats > div").all_text_contents()] for i in range(2)]
+        st3 = [[norm(x) for x in pg.locator(".pit").nth(i).locator(".fi .stats > div").all_text_contents()] for i in range(2)]
         check("season game 3: WHIP shows when the data has it", st3 == [fi_expect(g3["starters"]["away"]["first_inning"]), fi_expect(g3["starters"]["home"]["first_inning"])] and st3[0][-1] == "WHIP1.23" and len(st3[1]) == 3, st3)
         lines = sorted((k for k in g3["markets"]["total_over"] if k.endswith(".5")), key=float)
         over = sum(r3["total_runs"] > float(k) for k in lines)
@@ -993,15 +1236,30 @@ def test_season(browser):
         ctx.close()
 
         # one game at a time, each with its own line-score fixture
-        def one(game, spec, fixed="2026-04-14T14:00:00Z", install=False):
+        def one(game, spec, fixed="2026-04-14T14:00:00Z", install=False, box=None, series=None):
             dd = season_data()
             dd["games"] = [copy.deepcopy(game)]
             write_page(pj, dd)
             c = new_ctx(browser)
-            p, lg = open_page(c, base, fixed=fixed, api=Api({str(game["game_id"]): spec}), install=install)
+            pk = str(game["game_id"])
+            table = {pk: spec}
+            if box:
+                table["boxscore/" + pk] = box
+            if series:
+                table["series/" + pk] = series
+            p, lg = open_page(c, base, fixed=fixed, api=Api(table), install=install)
             p.wait_for_selector(".board")
             settle(p, 300)
             return c, p, lg
+
+        # season series strips: a series sweep (across a month end), a winless team with games left, postseason in progress
+        for name, exp in (("series-sweep.json", ["Season series: Yankees 4–2", "Red Sox swept a 2-game series, June 30–July 1.", "Yankees swept a 3-game series, July 7–9."]),
+                          ("series-winless.json", ["Season series: Red Sox 2–0", "Yankees haven't beaten the Red Sox this season (0–2, 1 game left)."]),
+                          ("series-postseason.json", ["Season series: tied 3–3", "ALCS: Red Sox lead 3–2."]),
+                          ("series-postseason-tied.json", ["Season series: tied 3–3", "NLCS: tied 2–2."])):
+            ctx, pg, _ = one(g3, "linescore-final-x.json", series=name)
+            check(f"series strip {name[7:-5]}: worked out in the test and shown", strip(pg) == SERIES_LINES(g3, fixture(name)) == exp, (strip(pg), SERIES_LINES(g3, fixture(name))))
+            ctx.close()
 
         # home team didn't bat in the 9th
         ctx, pg, _ = one(g3, "linescore-final-x.json")
@@ -1051,20 +1309,23 @@ def test_season(browser):
 
         # ---------- polling ----------
         # live: every 30 seconds, then stops once the API says final
-        ctx, pg, _ = one(g2, "linescore-live.json", install=True)
-        n0 = pg.api.count(1002)
+        ctx, pg, _ = one(g2, "linescore-live.json", install=True, box="boxscore-live.json", series="series-tied.json")
+        both = lambda: (pg.api.count(1002), pg.api.count(1002, "boxscore"))
+        n0 = both()
         adv(pg, 29000)
-        n1 = pg.api.count(1002)
+        n1 = both()
         adv(pg, 1500)
-        n2 = pg.api.count(1002)
+        n2 = both()
         adv(pg, 30000)
-        n3 = pg.api.count(1002)
-        check("polling live: first fetch on render, then one every 30 seconds", (n0, n1, n2, n3) == (1, 1, 2, 3), (n0, n1, n2, n3))
-        pg.api.table["1002"] = "linescore-final-x.json"
+        n3 = both()
+        check("polling live: first fetch on render, then one every 30 seconds; the boxscore rides the same timer",
+              (n0, n1, n2, n3) == ((1, 1), (1, 1), (2, 2), (3, 3)), (n0, n1, n2, n3))
+        pg.api.table["linescore/1002"] = "linescore-final-x.json"
         adv(pg, 30000)
         n4 = pg.api.count(1002)
         adv(pg, 10 * 60000)
-        check("polling live: stops once the game is final", (n4, pg.api.count(1002)) == (4, 4), pg.api.calls)
+        check("polling live: stops once the game is final", (n4, pg.api.count(1002), pg.api.count(1002, "boxscore")) == (4, 4, 4), pg.api.every)
+        check("polling live: the series is fetched once per game, not on the timer", pg.api.count(1002, "series") == 1, pg.api.every)
         check("polling live: the board shows the final line score", ls_rows(pg) == LS(fixture("linescore-final-x.json"), "ATH", "SEA") and pg.locator(".bd-live").count() == 0)
         ctx.close()
 
@@ -1109,7 +1370,7 @@ def test_season(browser):
         adv(pg, 31000)
         p3 = pg.api.count(1001)          # 23:00:02
         check("polling preview: none until 15 minutes before, then every 5 minutes", (p0, p1, p2, p2b, p3) == (1, 1, 2, 2, 3), (p0, p1, p2, p2b, p3))
-        pg.api.table["1001"] = "linescore-live.json"
+        pg.api.table["linescore/1001"] = "linescore-live.json"
         adv(pg, 5 * 60000)
         p4 = pg.api.count(1001)          # 23:05:02, now live
         live_now = tc(pg, ".bd-live")
@@ -1121,7 +1382,7 @@ def test_season(browser):
         ctx, pg, _ = one(g2, "hang", fixed="2026-04-14T21:00:00Z", install=True)
         adv(pg, 10500)
         after_abort = (pg.api.count(1002), tc(pg, ".bd-live"))
-        pg.api.table["1002"] = "linescore-live.json"
+        pg.api.table["linescore/1002"] = "linescore-live.json"
         adv(pg, 30500)
         check("polling timeout: a timed-out fetch keeps page.json's line, then the next poll fills the board",
               after_abort == (1, ["Live, bottom 5th, 2 outs"]) and pg.api.count(1002) == 2 and tc(pg, ".bd-live") == ["Live, top 6th, 1 out"]

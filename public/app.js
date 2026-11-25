@@ -1,6 +1,7 @@
 /* diamondmetrics: MLB predictions.
    Reads data/page.json (and optionally data/site.json) and builds the page with DOM calls.
-   The selected game's line score comes from /api/linescore/{game_id} (the same-origin Worker).
+   The selected game's line score, starters' lines and catchers, and season series come from the same-origin Worker
+   (/api/linescore, /api/boxscore and /api/series). page.json stays the source for every prediction.
    Text is inserted as text nodes only, there are no inline styles, and no third-party requests. */
 (() => {
   'use strict';
@@ -49,18 +50,16 @@
   const code = (name) => TEAM_CODES[name] || String(name || '?').split(' ').pop().slice(0, 3).toUpperCase();
   const nick = (name) => NICK[name] || String(name || '?').split(' ').pop();
 
-  // Line score refresh: every 30 s while live; every 5 min for a game that starts within 15 min.
+  // Live data refresh: every 30 s while live; every 5 min for a game that starts within 15 min.
   const LIVE_MS = 30000;
   const PRE_MS = 300000;
   const PRE_WINDOW_MS = 15 * 60000;
   const FETCH_TIMEOUT_MS = 10000;
   const STOPPED = /^(Postponed|Cancelled|Suspended)/;
 
-  function lastName(name) {
-    const parts = String(name || '').trim().split(/\s+/);
-    while (parts.length > 1 && /^(jr\.?|sr\.?|ii|iii|iv)$/i.test(parts[parts.length - 1])) parts.pop();
-    return parts[parts.length - 1] || '';
-  }
+  // Names compared without case or accents (Díaz = Diaz).
+  const sameName = (a, b) => String(a || '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase()
+    === String(b || '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase();
 
   const SVGNS = 'http://www.w3.org/2000/svg';
 
@@ -83,14 +82,14 @@
     return el;
   }
 
-  // A small line icon on a 16-unit grid. label null: decorative (hidden from screen readers).
+  // A small icon on a 16-unit grid, drawn in currentColor (the slot sets the colour). label null: decorative.
   function svgIcon(shapes, size, label) {
     const s = document.createElementNS(SVGNS, 'svg');
     for (const [k, v] of [['viewBox', '0 0 16 16'], ['width', size], ['height', size], ['focusable', 'false'], ['class', 'ico']]) s.setAttribute(k, String(v));
     if (label) { s.setAttribute('role', 'img'); s.setAttribute('aria-label', label); } else s.setAttribute('aria-hidden', 'true');
     for (const [tag, attrs] of shapes) {
       const el = document.createElementNS(SVGNS, tag);
-      const all = { fill: 'none', stroke: '#2E7A4F', 'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', ...attrs };
+      const all = { fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', ...attrs };
       for (const [k, v] of Object.entries(all)) el.setAttribute(k, v);
       s.append(el);
     }
@@ -105,7 +104,7 @@
       label: 'got a hit',
       shapes: [['path', {
         d: 'M-5.7-.75H-1C2-.75 3-2.5 5.5-2.5A2.5 2.5 0 0 1 5.5 2.5C3 2.5 2 .75-1 .75H-5.7A1.5 1.5 0 1 1-5.7-.75z',
-        transform: 'translate(8 8) rotate(-45)', fill: '#2E7A4F', stroke: 'none',
+        transform: 'translate(8 8) rotate(-45)', fill: 'currentColor', stroke: 'none',
       }]],
     },
     tb: { label: 'two or more bases', shapes: [['path', { d: 'M3 8.5l3.2 3.2L13 4.5', 'stroke-width': '2.2' }]] },
@@ -158,6 +157,16 @@
     });
   }
 
+  // "July 7–9", "June 30–July 2", or "July 7" for one day.
+  function dateRange(a, b) {
+    const p = ymd(a);
+    const q = ymd(b) || p;
+    if (!p) return '';
+    const month = (x) => new Date(Date.UTC(x[0], x[1] - 1, 1)).toLocaleDateString('en-US', { month: 'long', timeZone: 'UTC' });
+    if (p[1] === q[1] && p[2] === q[2] && p[0] === q[0]) return month(p) + ' ' + p[2];
+    return month(p) + ' ' + p[2] + '–' + (p[1] === q[1] ? '' : month(q) + ' ') + q[2];
+  }
+
   function daysUntil(s) {
     const p = ymd(s);
     if (!p) return null;
@@ -193,22 +202,25 @@
     return r.json();
   }
 
-  // The line score from the Worker, or null on any failure (the board then stays empty, without an error).
-  async function getLineScore(gamePk) {
+  // One Worker endpoint, or null on any failure (the page then leaves that part empty, without an error).
+  async function getApi(name, gamePk, valid) {
     if (!/^\d{1,8}$/.test(String(gamePk))) return null;
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
     try {
-      const r = await fetch('/api/linescore/' + gamePk, { signal: ctl.signal });
+      const r = await fetch('/api/' + name + '/' + gamePk, { signal: ctl.signal });
       if (!r.ok) return null;
-      const ls = await r.json();
-      return ls && typeof ls.state === 'string' && Array.isArray(ls.innings) ? ls : null;
+      const body = await r.json();
+      return body && valid(body) ? body : null;
     } catch (e) {
       return null;
     } finally {
       clearTimeout(t);
     }
   }
+  const getLineScore = (pk) => getApi('linescore', pk, (b) => typeof b.state === 'string' && Array.isArray(b.innings));
+  const getBoxScore = (pk) => getApi('boxscore', pk, (b) => typeof b.state === 'string' && b.away && b.home);
+  const getSeries = (pk) => getApi('series', pk, (b) => b.regular && typeof b.regular === 'object');
 
   // ---------- Opening Day countdown ----------
   function renderBanner(site) {
@@ -389,6 +401,46 @@
       h('tbody', null, row('away'), row('home')));
   }
 
+  // The season series strip: each entry is [label or null, text].
+  function seriesLines(g, s) {
+    const out = [];
+    const r = s.regular || {};
+    const team = (side) => nick(g[side + '_team']);
+    const other = (side) => (side === 'away' ? 'home' : 'away');
+    const wins = { away: r.awayWins, home: r.homeWins };
+    if (ok(r.played) && ok(wins.away) && ok(wins.home)) {
+      let text;
+      if (r.played === 0) text = 'first meeting';
+      else if (wins.away === wins.home) text = 'tied ' + wins.away + '–' + wins.home;
+      else {
+        const lead = wins.away > wins.home ? 'away' : 'home';
+        text = team(lead) + ' ' + wins[lead] + '–' + wins[other(lead)];
+      }
+      out.push(['Season series:', text]);
+      for (const sw of Array.isArray(r.sweeps) ? r.sweeps : []) {
+        if (sw && (sw.winner === 'away' || sw.winner === 'home') && ok(sw.games)) {
+          out.push([null, team(sw.winner) + ' swept a ' + sw.games + '-game series, ' + dateRange(sw.startDate, sw.endDate) + '.']);
+        }
+      }
+      if ((r.seasonSweep === 'away' || r.seasonSweep === 'home') && ok(r.left)) {
+        const w = r.seasonSweep;
+        out.push([null, r.left === 0
+          ? team(w) + ' swept the season series ' + wins[w] + '–0.'
+          : team(other(w)) + " haven't beaten the " + team(w) + ' this season (0–' + wins[w] + ', ' + r.left + (r.left === 1 ? ' game' : ' games') + ' left).']);
+      }
+    }
+    const ps = s.postseason;
+    if (ps && typeof ps.description === 'string' && ps.result && ok(ps.result.wins) && ok(ps.result.losses)) {
+      const pr = ps.result;
+      const score = pr.wins + '–' + pr.losses;
+      const text = pr.leader === 'away' || pr.leader === 'home'
+        ? team(pr.leader) + (pr.over ? ' win ' : ' lead ') + score + '.'
+        : 'tied ' + score + '.';
+      out.push([ps.description + ':', text]);
+    }
+    return out;
+  }
+
   // The model's pick for each board market and whether it came true (page.json results only).
   // Each item: { cls, label (text and nodes), pick (null when even), hit (true, false, or null when unknown) }.
   function boardPicks(g) {
@@ -454,13 +506,21 @@
       return plate(wholePct(over ? ou.over : 100 - ou.over), 'b-plain', (over ? 'Over ' : 'Under ') + ou.line);
     }
 
+    // The battery under each team name: the starter from page.json, the catcher from the boxscore (filled in later).
+    const bline = (pos, name) => [h('span', { class: 'pos' }, pos), ' ', h('span', { class: 'who' }, name)];
+    const catchers = {
+      away: h('span', { class: 'bl bl-c' }, bline('C', 'not announced')),
+      home: h('span', { class: 'bl bl-c' }, bline('C', 'not announced')),
+    };
+
     function row(side) {
       const team = g[side + '_team'];
       const st = g.starters && g.starters[side];
       return h('tr', null,
         h('th', { scope: 'row', class: 'team' },
           h('span', { class: 'nick' }, nick(team)),
-          h('span', { class: 'pitch' }, st && st.name ? lastName(st.name) + ' pitching' : 'Starter not announced')),
+          h('span', { class: 'bl bl-sp' }, bline('SP', st && st.name ? st.name : 'not announced')),
+          catchers[side]),
         h('td', { 'data-label': 'Odds to win' }, plate(pct(m[side + '_win']), btier(m[side + '_win'], 'ml'))),
         h('td', { 'data-label': 'First 5 winner' }, plate(pct(m['f5_' + side]), btier(m['f5_' + side], 'f5'))),
         h('td', { 'data-label': 'Total runs O/U' }, ouCell(side)));
@@ -490,14 +550,28 @@
     const top = h('div', { class: 'bd-top' }, topLine(g, date, null));
     // The scroll box stays in place across refreshes, so keyboard focus on it is kept.
     const lsBox = h('div', { class: 'ls-scroll', tabindex: '0', role: 'region', 'aria-label': 'Line score' }, lineScoreTable(g, null));
+    // The season series strip stays hidden until the series loads (and stays hidden if it can't).
+    const ser = h('div', { class: 'ser', hidden: true });
     const el = h('section', { id: 'today', class: 'board', 'aria-labelledby': 'board-h' },
       h('h2', { id: 'board-h', class: 'sr' }, g.away_team + ' at ' + g.home_team),
       top,
       lsBox,
+      ser,
       h('div', { class: 'model' }, table, lamps));
     el.setLineScore = (ls) => {
       top.replaceChildren(...topLine(g, date, ls).filter(Boolean));
       lsBox.replaceChildren(lineScoreTable(g, ls));
+    };
+    el.setCatchers = (box) => {
+      for (const side of ['away', 'home']) {
+        const c = box[side] && box[side].catcher && typeof box[side].catcher.name === 'string' ? box[side].catcher.name : null;
+        catchers[side].replaceChildren(...bline('C', c || 'not announced'));
+      }
+    };
+    el.setSeries = (s) => {
+      const lines = seriesLines(g, s);
+      ser.replaceChildren(...lines.map(([lab, text]) => h('p', null, lab ? [h('span', { class: 'lab' }, lab), ' '] : null, text)));
+      ser.hidden = lines.length === 0;
     };
     return el;
   }
@@ -580,28 +654,31 @@
     })));
   }
 
+  // One team's starting pitcher block. The starter's name and every prediction come from page.json; once the game has
+  // started, the boxscore adds his line. setLine(team, state) fills it in.
   function pitcher(g, side) {
     const p = g.starters && g.starters[side];
     const team = g[side + '_team'];
-    if (!p) return h('div', { class: 'pit' }, h('div', { class: 'who' }, nick(team)), h('div', { class: 'nm' }, 'Starter not announced'));
     const res = finalResults(g);
     const threw = res && res.starter_k && ok(res.starter_k[side]) ? res.starter_k[side] : null;
-    const ladder = Object.keys(p.k_over || {}).sort((a, b) => Number(a) - Number(b));
-    const kl = kLine(p.k_over);
-    const f = p.first_inning;
-    return h('div', { class: 'pit' },
+    const lineSlot = h('div', { class: 'pline-slot' });
+    const kl = p ? kLine(p.k_over) : null;
+    const ladder = p ? Object.keys(p.k_over || {}).sort((a, b) => Number(a) - Number(b)) : [];
+    const f = p ? p.first_inning : null;
+    const el = h('div', { class: 'pit' },
       h('div', { class: 'who' }, nick(team)),
-      h('div', { class: 'nm' }, p.name),
+      h('div', { class: 'nm' }, p && p.name ? p.name : 'Starter not announced'),
       kl ? h('div', { class: 'kou' },
         h('div', { class: 'kou-l' }, 'Strikeouts O/U ' + kl.line),
         h('div', { class: 'kou-v' },
           h('span', null, 'Over ', h('b', null, wholePct(kl.over))),
           h('span', null, 'Under ', h('b', null, wholePct(100 - kl.over))))) : null,
-      h('div', { class: 'ladder' }, ladder.map((k) => h('div', { class: 'rung' },
+      lineSlot,
+      p ? h('div', { class: 'ladder' }, ladder.map((k) => h('div', { class: 'rung' },
         h('div', { class: 'l' }, k + '+ K'),
         h('div', { class: 'v' }, pcell(p.k_over[k], 'k' + k)),
-        mark(threw !== null && threw >= Number(k), 'reached')))),
-      f
+        mark(threw !== null && threw >= Number(k), 'reached')))) : null,
+      !p ? null : f
         ? h('div', { class: 'fi' },
           h('div', { class: 'fi-l' }, 'First inning'),
           h('div', { class: 'stats' },
@@ -610,6 +687,18 @@
             stat('OBP', dot3(f.opp_obp)),
             ok(f.whip) ? stat('WHIP', fix2(f.whip)) : null))
         : h('p', { class: 'fi-none' }, 'First-inning record not shown (fewer than 5 starts).'));
+    el.setLine = (t, state) => {
+      const sp = t && t.pitcher && typeof t.pitcher.name === 'string' ? t.pitcher : null;
+      const line = sp && sp.line && typeof sp.line.ip === 'string' ? sp.line : null;
+      if (!line || (state !== 'live' && state !== 'final')) { lineSlot.replaceChildren(); return; }
+      const n = (x) => (ok(x) ? String(x) : '–');
+      // replaceChildren would write a null as the text "null", so leave the note out rather than pass null
+      const kids = [h('div', { class: 'pline' }, h('div', { class: 'stats' },
+        stat('IP', line.ip), stat('H', n(line.h)), stat('BB', n(line.bb)), stat('SO', n(line.so))))];
+      if (!p || !sameName(sp.name, p.name)) kids.unshift(h('p', { class: 'started' }, 'Started: ' + sp.name));
+      lineSlot.replaceChildren(...kids);
+    };
+    return el;
   }
 
   function lineupTable(g, side) {
@@ -683,12 +772,13 @@
       h('p', null, 'Home run conditions score, 0 to 100: 65 and up Very HR Friendly, 55 to 64 HR Friendly, 45 to 54 Neutral, 35 to 44 HR Suppressed, under 35 Very HR Suppressed. One point is about one foot of expected carry change. Indoor parks are scored a neutral 50.'));
   }
 
-  // ---------- live line score for the selected game ----------
-  // One game at a time. gen changes on every game switch, so a late answer for the old game is dropped.
+  // ---------- live data for the selected game ----------
+  // One game at a time, one timer: each tick fetches the line score and the boxscore together. The series is fetched
+  // once per game. gen changes on every game switch, so a late answer for the old game is dropped.
   function liveScore() {
     let gen = 0;
     let timer = null;
-    let due = null;  // the next refresh, kept while the tab is hidden: { my, g, el }
+    let due = null;  // the next refresh, kept while the tab is hidden: { my, g, view }
     let last = null; // the last state the API gave for this game
 
     // Milliseconds until the next refresh, or null for none.
@@ -707,17 +797,28 @@
       timer = null;
       const d = due;
       due = null;
-      if (d && d.my === gen) load(d.my, d.g, d.el);
+      if (d && d.my === gen) load(d.my, d.g, d.view);
     }
 
-    async function load(my, g, el) {
-      const ls = await getLineScore(g.game_id);
+    async function load(my, g, view) {
+      const [ls, box] = await Promise.all([getLineScore(g.game_id), getBoxScore(g.game_id)]);
       if (my !== gen) return;
-      if (ls) { last = ls.state; el.setLineScore(ls); }
+      if (ls) { last = ls.state; view.board.setLineScore(ls); }
+      if (box) {
+        const state = ls ? ls.state : box.state;
+        view.board.setCatchers(box);
+        view.pitchers.away.setLine(box.away, state);
+        view.pitchers.home.setLine(box.home, state);
+      }
       const next = nextDelay(g, ls);
       if (next === null) return;
-      due = { my, g, el };
+      due = { my, g, view };
       if (!document.hidden) timer = setTimeout(fire, next);
+    }
+
+    async function loadSeries(my, g, view) {
+      const s = await getSeries(g.game_id);
+      if (my === gen && s) view.board.setSeries(s);
     }
 
     // Hidden tab: no requests. Visible again: refresh at once, then carry on.
@@ -726,13 +827,15 @@
     });
 
     return {
-      show(g, el) {
+      // view: { board, pitchers: { away, home } }
+      show(g, view) {
         gen += 1;
         clearTimeout(timer);
         timer = null;
         due = null;
         last = null;
-        load(gen, g, el);
+        load(gen, g, view);
+        loadSeries(gen, g, view);
       },
     };
   }
@@ -766,14 +869,15 @@
         return;
       }
       const b = board(g, page.date);
+      const pitchers = { away: pitcher(g, 'away'), home: pitcher(g, 'home') };
       boardSlot.replaceChildren(b);
       mainCol.replaceChildren(...[conditions(g), totals(g),
-        section('pitchers', replay ? 'Battery' : "Today's battery", 'Chance each starter reaches a strikeout total.',
-          h('div', { class: 'pits' }, pitcher(g, 'away'), pitcher(g, 'home'))),
+        section('pitchers', 'Starting pitchers', null,
+          h('div', { class: 'pits' }, pitchers.away, pitchers.home)),
         section('lineups', 'Lineups and player props', null,
           lineupTable(g, 'away'), lineupTable(g, 'home')),
       ].filter(Boolean));
-      score.show(g, b);
+      score.show(g, { board: b, pitchers });
     }
 
     const kids = [...head];

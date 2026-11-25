@@ -1,6 +1,8 @@
-/* diamondmetrics: MLB predictions. Outfield scoreboard look. Light theme only.
-   Fonts are self-hosted (SIL Open Font License, see fonts/). Yellow means only one thing:
-   yellow numerals on a green plate are strong. Lamps are green (pick came true), red (missed) or white (live). */
+/* diamondmetrics: MLB predictions. Outfield scoreboard on an infield: green is the grass, the content column is
+   the infield dirt, chalk lines divide the sections, and two yellow foul poles run down the sides of the column.
+   Fonts are self-hosted (SIL Open Font License, see fonts/). Yellow means "strong" (yellow numerals on a dark plate),
+   plus the hot home-run bar, focus rings on green, the brand mark and the foul poles. Lamps are green (pick came true),
+   red (missed) or white (live). */
 
 @font-face {
   font-family: "Big Shoulders";
@@ -30,13 +32,16 @@
   --miss: #FF6B5E;
   --dim: #93AB9E;
   --label: #C9D6CE;
-  --ground: #EDF0EA;
+  --dirt: #D9C3A0;
+  --chalk: #FBF8F1;
+  --pole: #F2C12E;
+  --track: #E8D9BE;
   --ink: #13241C;
-  --muted: #4E5F56;
-  --low: #5F6E66;
-  --rule: #D3DBD1;
+  --muted: #4A3D2E;
+  --low: #5A4936;
+  --rule: #EFE3CC;
   --bar: #2E6B4F;
-  --ok: #2E7A4F;
+  --ok: #1A5E37;
   --hover: #0F2A1E;
   --display: "Big Shoulders", "Arial Narrow", system-ui, sans-serif;
   --text: "Libre Franklin", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -48,7 +53,7 @@ html { -webkit-text-size-adjust: 100%; }
 
 body {
   margin: 0;
-  background: var(--ground);
+  background: var(--board);
   color: var(--ink);
   font: 400 16px/1.45 var(--text);
   font-variant-numeric: tabular-nums;
@@ -56,14 +61,13 @@ body {
   display: flex;
   flex-direction: column;
 }
-main { flex: 1 0 auto; }
 p { margin: 0; }
 a { color: var(--board); }
 a:hover { color: var(--hover); }
 [hidden] { display: none !important; }
 .sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 
-/* focus: board green on the ground, yellow on green areas */
+/* focus: board green on the dirt, yellow on green areas */
 :focus-visible { outline: 3px solid var(--board); outline-offset: 2px; }
 .top :focus-visible, .oot :focus-visible, .board :focus-visible, footer :focus-visible { outline-color: var(--lamp); }
 
@@ -71,6 +75,9 @@ a:hover { color: var(--hover); }
 .skip:focus { left: 8px; }
 
 .wrap { width: 100%; max-width: 1280px; margin: 0 auto; padding-left: 40px; padding-right: 40px; }
+
+/* the infield: one dirt column from the nav to the footer, with a foul pole down each side */
+.infield { flex: 1 0 auto; width: 100%; max-width: 1280px; margin: 0 auto; background: var(--dirt); box-shadow: inset 4px 0 0 var(--pole), inset -4px 0 0 var(--pole); }
 
 /* ---------- nav ---------- */
 .top { background: var(--board); border-bottom: 4px solid var(--plate); }
@@ -151,14 +158,22 @@ h1 + .upd { margin-top: 14px; }
 .ip.big { width: 44px; height: 48px; font-size: 34px; }
 .ip.cur { outline: 2px solid var(--white); outline-offset: -2px; }
 
+/* main board: the season series strip, between the line score and the model numbers */
+.ser { margin-top: 16px; padding-top: 12px; border-top: 2px solid var(--seam); display: grid; row-gap: 4px; font-size: 15px; line-height: 1.4; color: var(--white); }
+.ser .lab { color: var(--label); }
+
 /* main board: model numbers, below the line score */
 .model { margin-top: 18px; padding-top: 6px; border-top: 2px solid var(--seam); }
+.ser + .model { margin-top: 14px; }
 .bd { width: 100%; margin-top: 10px; border-collapse: collapse; }
 .bd th, .bd td { padding: 8px 18px 10px 0; text-align: left; vertical-align: top; }
 .bd thead th { padding-top: 0; padding-bottom: 6px; font-size: 14px; font-weight: 500; color: var(--label); white-space: nowrap; }
 .bd .team { padding-right: 24px; }
 .nick { display: block; font-family: var(--display); font-weight: 800; font-size: 48px; line-height: 1; color: var(--white); white-space: nowrap; }
-.pitch { display: block; margin-top: 6px; font-size: 14px; font-weight: 400; color: var(--label); white-space: nowrap; }
+/* the battery under each team name: SP and C labels in label grey, names in white */
+.bl { display: block; font-size: 14px; font-weight: 400; line-height: 1.35; color: var(--white); white-space: nowrap; }
+.bl-sp { margin-top: 6px; }
+.bl .pos { display: inline-block; min-width: 22px; color: var(--label); }
 
 /* result lamps: one per board market */
 .lamprow { margin-top: 14px; padding-top: 14px; border-top: 2px solid var(--seam); }
@@ -167,28 +182,26 @@ h1 + .upd { margin-top: 14px; }
 .lr .lamp { margin-right: 8px; vertical-align: -1px; }
 .num { font-family: var(--display); font-weight: 800; font-size: 22px; line-height: 1; }
 
-/* ---------- below the board ---------- */
+/* ---------- below the board, on the dirt ---------- */
 .cols { margin-top: 48px; display: flex; flex-wrap: wrap; gap: 48px; align-items: flex-start; }
 .maincol { flex: 999 1 640px; min-width: 0; }
 .rail { flex: 1 1 300px; min-width: 0; }
 .sec + .sec { margin-top: 48px; }
-.sec h2 { margin: 0; font-family: var(--display); font-weight: 800; font-size: 34px; line-height: 1.05; color: var(--board); }
-.subl { margin-top: 6px; font-size: 16px; color: var(--muted); }
+/* section headings are green bands with chalk text */
+.sec h2 { margin: 0 0 14px; padding: 10px 16px 8px; background: var(--board); color: var(--chalk); border-bottom: 3px solid var(--chalk); font-family: var(--display); font-weight: 800; font-size: 34px; line-height: 1.05; }
+.subl { font-size: 16px; color: var(--muted); }
 .sec > .subl { margin-bottom: 18px; }
-.sec > h2 + .cond-note, .sec > h2 + .wx { margin-top: 14px; }
-.sec > h2 + .hrbox { margin-top: 14px; }
-.sec > h2 + .lu { margin-top: 14px; }
 
-/* probability chips in tables: strong = yellow on a plate, watch = ink, low = grey */
+/* probability chips in tables: strong = yellow on a plate, watch = ink, low = dark brown */
 .p { display: inline-block; font-weight: 600; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
 .p-strong { background: var(--plate); color: var(--lamp); box-shadow: inset 0 1px 2px rgba(0, 0, 0, .45); }
 .p-watch { color: var(--ink); }
 .p-low { color: var(--low); }
-/* the slot for a check mark or a result icon, so numbers stay aligned */
-.ck { display: inline-flex; align-items: center; width: 18px; justify-content: flex-end; vertical-align: middle; }
+/* the slot for a check mark or a result icon, so numbers stay aligned; icons draw in currentColor */
+.ck { display: inline-flex; align-items: center; width: 18px; justify-content: flex-end; vertical-align: middle; color: var(--ok); }
 .ck svg { display: block; }
 
-/* readings: home run conditions and first-inning stats */
+/* readings: home run conditions, first-inning stats and the starter's line */
 .wx, .stats { display: flex; flex-wrap: wrap; gap: 14px 40px; }
 .stats { gap: 10px 32px; }
 .wx .k, .stats .k { font-size: 13px; color: var(--muted); }
@@ -196,9 +209,10 @@ h1 + .upd { margin-top: 14px; }
 .wx .note { margin-top: 2px; font-size: 13px; color: var(--muted); }
 .cond-note { font-size: 16px; }
 .hrbox { margin-top: 20px; max-width: 640px; }
+.sec > h2 + .hrbox { margin-top: 0; }
 .hrrow { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; font-size: 15px; }
 .hrnum { font-weight: 700; }
-.track { margin-top: 8px; height: 18px; background: var(--rule); }
+.track { margin-top: 8px; height: 18px; background: var(--track); }
 .fill { height: 18px; background: var(--bar); }
 .fill.hot { background: var(--lamp); outline: 1px solid #8A6A00; outline-offset: -1px; }
 
@@ -206,19 +220,21 @@ h1 + .upd { margin-top: 14px; }
 .tot { display: grid; row-gap: 8px; max-width: 720px; }
 .tot-row { display: grid; grid-template-columns: 84px 1fr 52px 18px; align-items: center; column-gap: 12px; }
 .tot-l { font-size: 15px; }
-.bar { height: 18px; background: var(--rule); }
+.bar { height: 18px; background: var(--track); }
 .bar-fill { height: 18px; background: var(--bar); }
 .tot-v { font-weight: 600; text-align: right; }
 
-/* battery */
+/* starting pitchers */
 .pits { display: flex; flex-wrap: wrap; gap: 32px; }
-.pit { flex: 1 1 280px; min-width: 0; border-top: 3px solid var(--board); padding-top: 14px; }
+.pit { flex: 1 1 280px; min-width: 0; border-top: 3px solid var(--chalk); padding-top: 14px; }
 .pit .who { font-size: 14px; color: var(--muted); }
 .pit .nm { margin-top: 2px; font-family: var(--display); font-weight: 700; font-size: 32px; line-height: 1.05; }
+.started { margin-top: 10px; font-size: 13px; color: var(--muted); }
 .kou { margin-top: 10px; }
 .kou-l { font-size: 13px; font-weight: 600; color: var(--muted); }
 .kou-v { margin-top: 2px; display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 15px; }
 .kou-v b { font-size: 17px; font-weight: 700; }
+.pline { margin-top: 10px; }
 .ladder { margin-top: 12px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
 .rung { text-align: center; }
 .rung .l { font-size: 13px; color: var(--muted); }
@@ -233,7 +249,7 @@ h1 + .upd { margin-top: 14px; }
 .lu h3 { margin: 0 0 8px; font-family: var(--display); font-weight: 700; font-size: 24px; line-height: 1.1; color: var(--ink); }
 .scroll { position: relative; overflow-x: auto; overflow-y: hidden; } /* relative: keeps the screen-reader-only text inside the scroll box */
 table.t { width: 100%; border-collapse: collapse; font-size: 15px; }
-.t th { padding: 8px 6px; text-align: right; font-size: 13px; font-weight: 600; color: var(--muted); white-space: nowrap; border-bottom: 2px solid var(--board); }
+.t th { padding: 8px 6px; text-align: right; font-size: 13px; font-weight: 600; color: var(--muted); white-space: nowrap; border-bottom: 2px solid var(--chalk); }
 .t td { height: 44px; padding: 4px 6px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--rule); }
 .t .o { text-align: left; width: 32px; color: var(--muted); }
 .t .l, .t .n { text-align: left; }
@@ -253,7 +269,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 15px; }
 .bts .p { font-size: 18px; }
 
 /* rail: cut-offs */
-.how { margin-top: 32px; border-top: 3px solid var(--board); padding-top: 4px; }
+.how { margin-top: 32px; border-top: 3px solid var(--chalk); padding-top: 4px; }
 .how summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; gap: 10px; list-style: none; font-weight: 600; color: var(--board); }
 .how summary::-webkit-details-marker { display: none; }
 /* display:flex hides the built-in triangle, so draw one; it turns down when open */
@@ -263,7 +279,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 15px; }
 .how p { margin-top: 10px; font-size: 14px; line-height: 1.55; color: var(--muted); }
 .how p.key { margin-top: 4px; color: var(--ink); }
 .how table { margin-top: 10px; width: 100%; border-collapse: collapse; font-size: 14px; }
-.how th { text-align: left; padding: 6px 0; font-weight: 600; color: var(--muted); border-bottom: 2px solid var(--board); }
+.how th { text-align: left; padding: 6px 0; font-weight: 600; color: var(--muted); border-bottom: 2px solid var(--chalk); }
 .how td { padding: 5px 0; border-bottom: 1px solid var(--rule); }
 .how .r { text-align: right; }
 
