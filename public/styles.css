@@ -1,6 +1,6 @@
 /* diamondmetrics: MLB predictions. Outfield scoreboard look. Light theme only.
    Fonts are self-hosted (SIL Open Font License, see fonts/). One meaning for yellow:
-   yellow numerals on a green plate mean strong. */
+   yellow numerals on a green plate mean strong; a yellow outline marks the half-inning being played. */
 
 @font-face {
   font-family: "Big Shoulders";
@@ -111,7 +111,7 @@ h1 + .upd { margin-top: 14px; }
 .b-strong { color: var(--lamp); }
 .b-watch, .b-plain { color: var(--white); }
 .b-low { color: var(--dim); }
-.cap { margin-top: 5px; font-size: 13px; color: var(--label); }
+.cap { margin-top: 5px; font-size: 13px; color: var(--label); white-space: nowrap; }
 
 /* lamps */
 .lamp { flex: none; display: inline-block; width: 14px; height: 14px; border-radius: 50%; background: var(--plate); box-shadow: inset 0 0 0 2px var(--seam); }
@@ -128,18 +128,29 @@ h1 + .upd { margin-top: 14px; }
 .gm-at { font-size: 14px; color: var(--label); }
 .gm .st { margin-left: auto; padding-left: 8px; font-size: 14px; color: var(--label); white-space: nowrap; }
 
-/* main board */
+/* main board: top line */
 .bd-top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px 24px; font-size: 15px; color: var(--label); }
 .bd-live { display: inline-flex; align-items: center; gap: 8px; color: var(--white); }
-.bd { width: 100%; margin-top: 16px; border-collapse: collapse; }
+
+/* main board: line score */
+.ls-scroll { position: relative; margin-top: 14px; overflow-x: auto; }
+.ls { border-collapse: separate; border-spacing: 4px 6px; margin: -6px -4px; }
+.ls th, .ls td { padding: 0; text-align: center; vertical-align: middle; }
+.ls thead th { font-size: 13px; font-weight: 500; line-height: 1; color: var(--label); padding-bottom: 2px; }
+.ls .ls-team { padding-right: 12px; text-align: left; font-family: var(--display); font-weight: 800; font-size: 26px; line-height: 1; color: var(--white); white-space: nowrap; }
+.ls .rhe.first { border-left: 2px solid var(--seam); padding-left: 10px; }
+.ip { display: flex; align-items: center; justify-content: center; width: 34px; height: 40px; margin: 0 auto; background: var(--plate); border-radius: 3px; box-shadow: inset 0 2px 3px rgba(0, 0, 0, .5); font-family: var(--display); font-weight: 700; font-size: 28px; line-height: 1; color: var(--white); }
+.ip.big { width: 44px; height: 48px; font-size: 34px; }
+.ip.cur { outline: 2px solid var(--lamp); outline-offset: -2px; }
+
+/* main board: model numbers, below the line score */
+.model { margin-top: 18px; padding-top: 6px; border-top: 2px solid var(--seam); }
+.bd { width: 100%; margin-top: 10px; border-collapse: collapse; }
 .bd th, .bd td { padding: 8px 18px 10px 0; text-align: left; vertical-align: top; }
 .bd thead th { padding-top: 0; padding-bottom: 6px; font-size: 14px; font-weight: 500; color: var(--label); white-space: nowrap; }
-.bd .last { border-left: 2px solid var(--seam); padding-left: 18px; padding-right: 0; }
-.bd thead th.last { color: var(--lamp); }
 .bd .team { padding-right: 24px; }
 .nick { display: block; font-family: var(--display); font-weight: 800; font-size: 48px; line-height: 1; color: var(--white); white-space: nowrap; }
 .pitch { display: block; margin-top: 6px; font-size: 14px; font-weight: 400; color: var(--label); white-space: nowrap; }
-.ou-l { margin-bottom: 5px; font-size: 13px; line-height: 1.2; color: var(--label); white-space: nowrap; }
 
 .lamprow { margin-top: 14px; padding-top: 14px; border-top: 2px solid var(--seam); }
 .lr-nr { font-size: 15px; color: var(--white); }
@@ -155,6 +166,7 @@ h1 + .upd { margin-top: 14px; }
 .subl { margin-top: 6px; font-size: 16px; color: var(--muted); }
 .sec > .subl { margin-bottom: 18px; }
 .sec > h2 + .cond-note, .sec > h2 + .wx { margin-top: 14px; }
+.sec > h2 + .hrbox { margin-top: 14px; }
 
 /* probability chips in tables: strong = yellow on a plate, watch = ink, low = grey */
 .p { display: inline-block; font-weight: 600; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
@@ -171,7 +183,6 @@ h1 + .upd { margin-top: 14px; }
 .wx .v, .stats .v { margin-top: 2px; font-weight: 600; font-size: 17px; }
 .wx .note { margin-top: 2px; font-size: 13px; color: var(--muted); }
 .cond-note { font-size: 16px; }
-.cond-note.dome { font-weight: 600; }
 .hrbox { margin-top: 20px; max-width: 640px; }
 .hrrow { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; font-size: 15px; }
 .hrnum { font-weight: 700; }
@@ -256,7 +267,6 @@ footer .wrap { padding-top: 28px; padding-bottom: 28px; display: flex; flex-wrap
   .plate .pc { font-size: 24px; }
   .nick { font-size: 40px; }
   .bd th, .bd td { padding-right: 12px; }
-  .bd .last { padding-left: 12px; }
   h1 { font-size: 64px; }
 }
 
@@ -271,19 +281,25 @@ footer .wrap { padding-top: 28px; padding-bottom: 28px; display: flex; flex-wrap
   .board, .oot { padding: 18px 16px; }
   .oot-grid { grid-template-columns: 1fr; }
 
+  .ls { border-spacing: 2px 4px; margin: -4px -2px; }
+  .ls thead th { font-size: 12px; }
+  .ls .ls-team { padding-right: 4px; font-size: 17px; }
+  .ls .rhe.first { padding-left: 4px; }
+  .ip { width: 20px; height: 28px; font-size: 16px; border-radius: 2px; }
+  .ip.big { width: 24px; height: 30px; font-size: 18px; }
+
   .bd, .bd tbody, .bd tr, .bd th, .bd td { display: block; }
   .bd thead { display: block; position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .bd tr { display: flex; flex-wrap: wrap; gap: 10px 8px; padding: 14px 0; }
   .bd tbody tr + tr { border-top: 2px solid var(--seam); }
-  .bd th, .bd td, .bd .last { padding: 0; border: 0; }
+  .bd th, .bd td { padding: 0; border: 0; }
   .bd .team { flex: 0 0 100%; padding: 0; }
   .bd td { flex: 0 1 auto; min-width: 0; }
   .bd td::before { content: attr(data-label); display: block; margin-bottom: 4px; font-size: 12px; color: var(--label); white-space: nowrap; }
-  .bd td.last::before { color: var(--lamp); }
   .nick { font-size: 38px; }
   .plate { font-size: 38px; padding: 6px 8px 4px; }
   .plate .pc { font-size: 19px; }
-  .cap, .ou-l { font-size: 12px; }
+  .cap { font-size: 12px; }
   .lamprow { margin-top: 4px; }
 
   .cols { margin-top: 36px; }

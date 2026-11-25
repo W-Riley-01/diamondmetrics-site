@@ -1,5 +1,6 @@
 /* diamondmetrics: MLB predictions.
    Reads data/page.json (and optionally data/site.json) and builds the page with DOM calls.
+   The selected game's line score comes from /api/linescore/{game_id} (the same-origin Worker).
    Text is inserted as text nodes only, there are no inline styles, and no third-party requests. */
 (() => {
   'use strict';
@@ -47,6 +48,13 @@
   };
   const code = (name) => TEAM_CODES[name] || String(name || '?').split(' ').pop().slice(0, 3).toUpperCase();
   const nick = (name) => NICK[name] || String(name || '?').split(' ').pop();
+
+  // Line score refresh: every 30 s while live; every 5 min for a game that starts within 15 min.
+  const LIVE_MS = 30000;
+  const PRE_MS = 300000;
+  const PRE_WINDOW_MS = 15 * 60000;
+  const FETCH_TIMEOUT_MS = 10000;
+  const STOPPED = /^(Postponed|Cancelled|Suspended)/;
 
   function lastName(name) {
     const parts = String(name || '').trim().split(/\s+/);
@@ -171,6 +179,23 @@
     return r.json();
   }
 
+  // The line score from the Worker, or null on any failure (the board then stays empty, without an error).
+  async function getLineScore(gamePk) {
+    if (!/^\d{1,8}$/.test(String(gamePk))) return null;
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const r = await fetch('/api/linescore/' + gamePk, { signal: ctl.signal });
+      if (!r.ok) return null;
+      const ls = await r.json();
+      return ls && typeof ls.state === 'string' && Array.isArray(ls.innings) ? ls : null;
+    } catch (e) {
+      return null;
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
   // ---------- Opening Day countdown ----------
   function renderBanner(site) {
     const el = document.getElementById('banner');
@@ -198,12 +223,23 @@
     return clock(g.start_time_utc);
   }
 
+  // "Live, bottom 5th, 2 outs" from page.json (the fallback when the line score can't be fetched).
   function liveText(g) {
     const half = g.inning_half ? String(g.inning_half).toLowerCase() : '';
     const where = g.inning ? [half, ordinal(g.inning)].filter(Boolean).join(' ') : '';
     const outs = typeof g.outs === 'number' ? ', ' + g.outs + (g.outs === 1 ? ' out' : ' outs') : '';
     return 'Live' + (where ? ', ' + where + outs : '');
   }
+
+  // The same line from the API: half is top, bottom, middle or end; outs only during a half.
+  function apiLiveText(ls) {
+    const where = ok(ls.inning) ? [ls.half, ordinal(ls.inning)].filter(Boolean).join(' ') : '';
+    const during = ls.half === 'top' || ls.half === 'bottom';
+    const outs = during && ok(ls.outs) ? ', ' + ls.outs + (ls.outs === 1 ? ' out' : ' outs') : '';
+    return 'Live' + (where ? ', ' + where + outs : '');
+  }
+
+  const stopped = (ls) => !!(ls && STOPPED.test(ls.detail || ''));
 
   const finalResults = (g) => (g.status === 'final' && g.results ? g.results : null);
 
@@ -269,52 +305,103 @@
   // Lamp-row value: bold numerals in the board tier colour, no plate (plates are for the board's main numbers).
   const num = (text, cls) => h('b', { class: 'num ' + cls }, text);
 
+  // The board's top line: park, then first pitch, the date, or a stopped game's status; a lit lamp while live.
+  function topLine(g, date, ls) {
+    const indoor = g.roof === 'dome' || (g.weather && g.weather.wind_label === 'Indoors');
+    const where = g.park ? g.park + (indoor ? ', indoors.' : '.') : null;
+    const day = longDate(date);
+    const first = clock(g.start_time_utc);
+    let when;
+    let live = null;
+    if (ls) {
+      if (stopped(ls)) when = ls.detail + '.';
+      else if (ls.state === 'preview') when = first ? 'First pitch ' + first + '.' : null;
+      else when = day ? day + '.' : null;
+      if (ls.state === 'live' && !stopped(ls)) live = apiLiveText(ls);
+    } else {
+      when = g.status === 'final' || g.status === 'live' ? (day ? day + '.' : null) : (first ? 'First pitch ' + first + '.' : null);
+      if (g.status === 'live') live = liveText(g);
+    }
+    return [h('p', { class: 'bd-where' }, [where, when].filter(Boolean).join(' ')),
+      live ? h('p', { class: 'bd-live' }, lamp(true), live) : null];
+  }
+
+  // The line score: a plate per inning (at least nine), then R, H and E. ls is null before it loads or when it can't be fetched.
+  function lineScoreTable(g, ls) {
+    const inns = (ls && ls.innings) || [];
+    const n = Math.max(9, inns.length, ls && ok(ls.inning) ? ls.inning : 0);
+    const stop = stopped(ls);
+    const fin = ls && ls.state === 'final' && !stop;
+    const live = ls && ls.state === 'live' && !stop;
+    const lastN = inns.length ? inns[inns.length - 1].n : null;
+    // The half being played (or about to be): top -> away, bottom or middle -> home, end -> next inning's away.
+    let cur = null;
+    if (live && ok(ls.inning)) {
+      if (ls.half === 'top') cur = ['away', ls.inning];
+      else if (ls.half === 'bottom' || ls.half === 'middle') cur = ['home', ls.inning];
+      else if (ls.half === 'end') cur = ['away', ls.inning + 1];
+    }
+    const total = (side, k) => (ls && ls[side] && ok(ls[side][k]) ? String(ls[side][k]) : '–');
+    const cols = [];
+    for (let i = 1; i <= n; i += 1) cols.push(i);
+
+    function row(side) {
+      return h('tr', null,
+        h('th', { scope: 'row', class: 'ls-team' }, code(g[side + '_team'])),
+        cols.map((i) => {
+          const inn = inns.find((x) => x.n === i);
+          const v = inn ? inn[side] : null;
+          let text = ok(v) ? String(v) : '';
+          if (fin && side === 'home' && i === lastN && lastN >= 9 && !ok(v)) text = 'X';
+          const isCur = cur && cur[0] === side && cur[1] === i;
+          return h('td', null, h('span', { class: 'ip' + (isCur ? ' cur' : '') }, text,
+            isCur ? h('span', { class: 'sr' }, ' (now batting)') : null));
+        }),
+        ['r', 'h', 'e'].map((k, j) => h('td', { class: 'rhe' + (j === 0 ? ' first' : '') }, h('span', { class: 'ip big' }, total(side, k)))));
+    }
+
+    return h('table', { class: 'ls' },
+      h('caption', { class: 'sr' }, 'Line score, ' + g.away_team + ' at ' + g.home_team),
+      h('thead', null, h('tr', null,
+        h('th', { scope: 'col' }, h('span', { class: 'sr' }, 'Team')),
+        cols.map((i) => h('th', { scope: 'col' }, String(i))),
+        h('th', { scope: 'col', class: 'rhe first' }, h('span', { 'aria-hidden': 'true' }, 'R'), h('span', { class: 'sr' }, 'Runs')),
+        h('th', { scope: 'col', class: 'rhe' }, h('span', { 'aria-hidden': 'true' }, 'H'), h('span', { class: 'sr' }, 'Hits')),
+        h('th', { scope: 'col', class: 'rhe' }, h('span', { 'aria-hidden': 'true' }, 'E'), h('span', { class: 'sr' }, 'Errors')))),
+      h('tbody', null, row('away'), row('home')));
+  }
+
   function board(g, date) {
     const m = g.markets || {};
-    const fin = g.status === 'final';
-    const live = g.status === 'live';
     const res = finalResults(g);
-    const indoor = g.roof === 'dome' || (g.weather && g.weather.wind_label === 'Indoors');
-    const first = clock(g.start_time_utc);
-    const day = longDate(date);
-    const where = g.park ? g.park + (indoor ? ', indoors.' : '.') : null;
-    const when = fin || live ? (day ? day + '.' : null) : (first ? 'First pitch ' + first + '.' : null);
-    const last = fin ? 'Final' : live ? 'Runs' : null;
-    const led = res && (res.led_after_5 === 'away' || res.led_after_5 === 'home') ? res.led_after_5 : null;
     const ou = ouLine(m.total_over);
 
     // Sportsbook layout: the away row shows the over, the home row the under, for the same line; the pair adds to 100.
     function ouCell(side) {
       if (!ou) return plate('–', 'b-plain');
       const over = side === 'away';
-      return h('div', { class: 'ou' },
-        h('div', { class: 'ou-l' }, (over ? 'Over ' : 'Under ') + ou.k),
-        plate(wholePct(over ? ou.over : 100 - ou.over), 'b-plain'));
+      return plate(wholePct(over ? ou.over : 100 - ou.over), 'b-plain', (over ? 'Over ' : 'Under ') + ou.k);
     }
 
     function row(side) {
       const team = g[side + '_team'];
       const st = g.starters && g.starters[side];
-      const score = g[side + '_score'];
       return h('tr', null,
         h('th', { scope: 'row', class: 'team' },
           h('span', { class: 'nick' }, nick(team)),
           h('span', { class: 'pitch' }, st && st.name ? lastName(st.name) + ' pitching' : 'Starter not announced')),
         h('td', { 'data-label': 'Odds to win' }, plate(pct(m[side + '_win']), btier(m[side + '_win'], 'ml'))),
-        h('td', { 'data-label': 'First 5 winner' }, plate(pct(m['f5_' + side]), btier(m['f5_' + side], 'f5'), led === side ? 'led after 5' : null)),
-        h('td', { 'data-label': 'Total runs O/U' }, ouCell(side)),
-        last ? h('td', { class: 'last', 'data-label': last }, plate(String(score ?? 0), 'b-plain')) : null);
+        h('td', { 'data-label': 'First 5 winner' }, plate(pct(m['f5_' + side]), btier(m['f5_' + side], 'f5'))),
+        h('td', { 'data-label': 'Total runs O/U' }, ouCell(side)));
     }
 
     const table = h('table', { class: 'bd' },
-      h('caption', { class: 'sr' }, g.away_team + ' at ' + g.home_team + ': odds to win, first 5 winner, total runs over and under'
-        + (last ? (fin ? ' and the final score' : ' and runs so far') : '')),
+      h('caption', { class: 'sr' }, g.away_team + ' at ' + g.home_team + ': odds to win, first 5 winner, total runs over and under'),
       h('thead', null, h('tr', null,
         h('th', { scope: 'col' }, h('span', { class: 'sr' }, 'Team')),
         h('th', { scope: 'col' }, 'Odds to win'),
         h('th', { scope: 'col' }, 'First 5 winner'),
-        h('th', { scope: 'col' }, 'Total runs O/U'),
-        last ? h('th', { scope: 'col', class: 'last' }, last) : null)),
+        h('th', { scope: 'col' }, 'Total runs O/U'))),
       h('tbody', null, row('away'), row('home')));
 
     // The lamp shows only where the result is a known yes or no.
@@ -325,13 +412,19 @@
         'NRFI ', num(pct(m.no_run_first), btier(m.no_run_first, 'nrfi')),
         nrLit ? h('span', { class: 'sr' }, ' It happened.') : null));
 
-    return h('section', { id: 'today', class: 'board', 'aria-labelledby': 'board-h' },
+    const top = h('div', { class: 'bd-top' }, topLine(g, date, null));
+    // The scroll box stays in place across refreshes, so keyboard focus on it is kept.
+    const lsBox = h('div', { class: 'ls-scroll', tabindex: '0', role: 'region', 'aria-label': 'Line score' }, lineScoreTable(g, null));
+    const el = h('section', { id: 'today', class: 'board', 'aria-labelledby': 'board-h' },
       h('h2', { id: 'board-h', class: 'sr' }, g.away_team + ' at ' + g.home_team),
-      h('div', { class: 'bd-top' },
-        h('p', { class: 'bd-where' }, [where, when].filter(Boolean).join(' ')),
-        live ? h('p', { class: 'bd-live' }, lamp(true), liveText(g)) : null),
-      table,
-      lamps);
+      top,
+      lsBox,
+      h('div', { class: 'model' }, table, lamps));
+    el.setLineScore = (ls) => {
+      top.replaceChildren(...topLine(g, date, ls).filter(Boolean));
+      lsBox.replaceChildren(lineScoreTable(g, ls));
+    };
+    return el;
   }
 
   function outOfTown(games, sel, onPick) {
@@ -363,9 +456,7 @@
     if (!w) return section('cond', title, null, h('p', { class: 'cond-note' }, 'The forecast for this park was not available when the prediction ran.'));
     const indoor = g.roof === 'dome' || w.wind_label === 'Indoors';
     const kids = [];
-    if (indoor) {
-      kids.push(h('p', { class: 'cond-note dome' }, 'Dome'));
-    } else {
+    if (!indoor) {
       const wind = !w.wind_mph ? 'Calm' : Math.round(w.wind_mph) + ' mph' + (w.wind_from && w.wind_from !== '—' ? ' from ' + w.wind_from : '');
       const cr = ok(w.carry_ft) ? Math.round(w.carry_ft) : null;
       const carry = cr === null ? '–' : (cr > 0 ? '+' : cr < 0 ? '−' : '') + Math.abs(cr) + ' ft';
@@ -385,7 +476,7 @@
       fill.style.width = score + '%';
       kids.push(h('div', { class: 'hrbox' },
         h('div', { class: 'hrrow' },
-          h('span', null, 'Home run conditions: ', h('b', null, w.hr_label || '')),
+          h('b', null, w.hr_label || ''),
           h('span', null, h('span', { class: 'hrnum' }, String(Math.round(score))), ' out of 100')),
         h('div', { class: 'track', 'aria-hidden': 'true' }, fill)));
     }
@@ -494,7 +585,7 @@
 
   function cutoffs() {
     const rows = [
-      ['Odds to win', 'ml'], ['First 5 winner', 'f5'], ['No run in the 1st', 'nrfi'],
+      ['Odds to win', 'ml'], ['First 5 winner', 'f5'], ['NRFI', 'nrfi'],
       ['Starter 3+ strikeouts', 'k3'], ['Starter 4+ strikeouts', 'k4'], ['Starter 5+ strikeouts', 'k5'],
       ['Starter 6+ strikeouts', 'k6'], ['Starter 7+ strikeouts', 'k7'],
       ['Batter 1+ hit', 'hit'], ['Batter 2+ total bases', 'tb'], ['Batter 1+ home run', 'hr'],
@@ -514,12 +605,67 @@
       h('p', null, 'Home run conditions score, 0 to 100: 65 and up Very HR Friendly, 55 to 64 HR Friendly, 45 to 54 Neutral, 35 to 44 HR Suppressed, under 35 Very HR Suppressed. One point is about one foot of expected carry change. Indoor parks are scored a neutral 50.'));
   }
 
+  // ---------- live line score for the selected game ----------
+  // One game at a time. gen changes on every game switch, so a late answer for the old game is dropped.
+  function liveScore() {
+    let gen = 0;
+    let timer = null;
+    let due = null;  // the next refresh, kept while the tab is hidden: { my, g, el }
+    let last = null; // the last state the API gave for this game
+
+    // Milliseconds until the next refresh, or null for none.
+    function nextDelay(g, ls) {
+      if (stopped(ls)) return null;
+      const state = ls ? ls.state : last || (g.status === 'scheduled' ? 'preview' : g.status);
+      if (state === 'live') return LIVE_MS;
+      if (state !== 'preview') return null;
+      const start = Date.parse(g.start_time_utc);
+      if (!Number.isFinite(start)) return null;
+      const wait = start - PRE_WINDOW_MS - Date.now();
+      return wait > 0 ? wait : PRE_MS;
+    }
+
+    function fire() {
+      timer = null;
+      const d = due;
+      due = null;
+      if (d && d.my === gen) load(d.my, d.g, d.el);
+    }
+
+    async function load(my, g, el) {
+      const ls = await getLineScore(g.game_id);
+      if (my !== gen) return;
+      if (ls) { last = ls.state; el.setLineScore(ls); }
+      const next = nextDelay(g, ls);
+      if (next === null) return;
+      due = { my, g, el };
+      if (!document.hidden) timer = setTimeout(fire, next);
+    }
+
+    // Hidden tab: no requests. Visible again: refresh at once, then carry on.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { clearTimeout(timer); timer = null; } else if (due && timer === null) fire();
+    });
+
+    return {
+      show(g, el) {
+        gen += 1;
+        clearTimeout(timer);
+        timer = null;
+        due = null;
+        last = null;
+        load(gen, g, el);
+      },
+    };
+  }
+
   // ---------- page ----------
   function renderPage(app, page, site) {
     const games = page.games;
     const picks = Array.isArray(page.beat_the_streak) ? page.beat_the_streak.slice(0, 5) : [];
     const replay = page.note === 'replay';
     let sel = games.length ? games[0].game_id : null;
+    const score = liveScore();
 
     const upd = page.updated_at && stamp(page.updated_at) ? 'Updated ' + stamp(page.updated_at) + '.' : '';
     const head = [h('h1', null, replay ? (site.replay_title || 'MLB predictions') : (longDate(page.date) || 'MLB predictions'))];
@@ -541,13 +687,15 @@
         mainCol.replaceChildren(h('p', { class: 'msg' }, 'No games are scheduled for this date.'));
         return;
       }
-      boardSlot.replaceChildren(board(g, page.date));
+      const b = board(g, page.date);
+      boardSlot.replaceChildren(b);
       mainCol.replaceChildren(...[conditions(g), totals(g),
         section('pitchers', 'Starting pitchers', 'Chance each starter reaches a strikeout total.',
           h('div', { class: 'pits' }, pitcher(g, 'away'), pitcher(g, 'home'))),
         section('lineups', 'Lineups and player props', 'Chance of at least one hit, two total bases, a homer, an RBI and a steal.',
           lineupTable(g, 'away'), lineupTable(g, 'home')),
       ].filter(Boolean));
+      score.show(g, b);
     }
 
     const kids = [...head];

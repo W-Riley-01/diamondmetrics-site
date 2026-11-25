@@ -1,0 +1,17 @@
+// diamondmetrics-site: static files from public/, plus a Worker script for /api/* only.
+// The custom domains (diamondmetrics.dev, app.diamondmetrics.dev) are attached in the dashboard, so there are no routes here.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "diamondmetrics-site",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    // Only the API runs the script; every other request is a static file, served with public/_headers.
+    "run_worker_first": ["/api/*"]
+  },
+  // Both off since Nov 18 and must stay off: the site is only served on its custom domains.
+  "workers_dev": false,
+  "preview_urls": false
+}
