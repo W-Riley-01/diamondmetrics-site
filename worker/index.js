@@ -4,6 +4,8 @@
 // GET /api/linescore/{gamePk}  the game's state and line score
 // GET /api/boxscore/{gamePk}   each team's starting pitcher (with his line) and starting catcher
 // GET /api/series/{gamePk}     the regular-season series between the two teams, and the postseason series
+// GET /api/standings/{gamePk}  each team's record and division standing going into the game
+// GET /api/battery/{gamePk}    each team's battery: record together this season, and stolen bases against each
 // All from the MLB Stats API, trimmed to what the page shows. Nothing from upstream is passed through as it is.
 
 const API = 'https://statsapi.mlb.com/api/v1/';
@@ -14,6 +16,10 @@ export const EDGE_TTL = { final: 86400, live: 15, preview: 300 };
 export const BROWSER_TTL = { final: 86400, live: 10, preview: 300 };
 // The season series changes at most once a game: an hour, or a day once the two teams have no meetings left.
 export const SERIES_TTL = { open: 3600, done: 86400 };
+// Standings: an hour for a regular-season game, a day for a postseason game (the final table doesn't change).
+export const STANDINGS_TTL = { regular: 3600, postseason: 86400 };
+// Battery: an hour, a day once the game is final.
+export const BATTERY_TTL = { open: 3600, final: 86400 };
 
 const BASE_HEADERS = {
   'Content-Type': 'application/json; charset=utf-8',
@@ -201,7 +207,149 @@ async function series(pk) {
   return { body, edge: ttl, browser: ttl };
 }
 
-const ROUTES = { linescore, boxscore, series };
+// ---------- shared: the game, with its probable pitchers ----------
+const gameCall = (pk) => getJSON('schedule?sportId=1&hydrate=probablePitcher&gamePk=' + pk);
+const teamId = (game, side) => int(game && game.teams && game.teams[side] && game.teams[side].team && game.teams[side].team.id);
+
+function checkGame(game) {
+  if (teamId(game, 'away') === null || teamId(game, 'home') === null || !/^\d{4}$/.test(String(game.season))
+      || !/^\d{4}-\d{2}-\d{2}$/.test(String(game.officialDate))) throw new Upstream('game');
+}
+
+// ---------- /api/standings ----------
+// "2026-04-01" -> "2026-03-31"
+export function dayBefore(ymd) {
+  const [y, m, d] = ymd.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d) - 86400000).toISOString().slice(0, 10);
+}
+
+// One team's standing in a standings response. Places come from games back, not divisionRank (which never ties):
+// place = 1 + the number of teams with fewer games back; equal games back is a tie. lead: a sole leader's margin.
+export function teamStanding(data, id) {
+  const gbOf = (t) => (t.divisionGamesBack === '-' ? 0 : Number(t.divisionGamesBack));
+  for (const rec of (data && Array.isArray(data.records) ? data.records : [])) {
+    const teams = Array.isArray(rec.teamRecords) ? rec.teamRecords : [];
+    const t = teams.find((x) => x && x.team && x.team.id === id);
+    if (!t) continue;
+    const mine = gbOf(t);
+    if (!Number.isFinite(mine)) return null;
+    const others = teams.filter((x) => x !== t).map(gbOf).filter(Number.isFinite);
+    const place = 1 + others.filter((g) => g < mine).length;
+    const tied = others.some((g) => g === mine);
+    const lead = place === 1 && !tied && others.length ? Math.min(...others) : null;
+    const dr = t.records && Array.isArray(t.records.divisionRecords)
+      ? t.records.divisionRecords.find((r) => r && r.division && rec.division && r.division.id === rec.division.id) : null;
+    return {
+      wins: int(t.wins), losses: int(t.losses),
+      division: rec.division && typeof rec.division.nameShort === 'string' ? rec.division.nameShort : null,
+      place, tied, gamesBack: mine, lead,
+      divisionRecord: dr ? { w: int(dr.wins), l: int(dr.losses) } : null,
+    };
+  }
+  return null;
+}
+
+async function standings(pk) {
+  const game = firstGame(await gameCall(pk));
+  if (!game) return null;
+  checkGame(game);
+  // A regular-season game: the standings going into its date (date= includes that day's games, so the day before).
+  // A postseason game: the final regular-season standings.
+  const post = POSTSEASON.has(game.gameType);
+  const asOf = post ? null : dayBefore(game.officialDate);
+  const data = await getJSON('standings?leagueId=103,104&season=' + game.season + '&standingsTypes=regularSeason&hydrate=division' + (asOf ? '&date=' + asOf : ''));
+  const body = { season: Number(game.season), asOf: asOf || 'final', away: teamStanding(data, teamId(game, 'away')), home: teamStanding(data, teamId(game, 'home')) };
+  const ttl = post ? STANDINGS_TTL.postseason : STANDINGS_TTL.regular;
+  return { body, edge: ttl, browser: ttl };
+}
+
+// ---------- /api/battery ----------
+const splitsOf = (data) => (data && Array.isArray(data.stats) ? data.stats.flatMap((s) => (s && Array.isArray(s.splits) ? s.splits : [])) : []);
+const pkOf = (s) => int(s && s.game && s.game.gamePk);
+const teamOf = (s) => int(s && s.team && s.team.id);
+
+// The battery's record together before this game. A start together is the same gamePk, the pitcher's split a start,
+// the catcher's split a start at C (a DH start, or coming on as a substitute, doesn't count), and both splits for the
+// same team (on 17 May 2026 Hicks caught Rasmussen's game for the other side). The date is only used for "before":
+// an earlier date, or the same date with a lower game number (doubleheaders), and never this game.
+export function together(pitcherLog, catcherLog, game) {
+  const thisPk = int(game.gamePk);
+  const before = (s) => pkOf(s) !== thisPk && typeof s.date === 'string'
+    && (s.date < game.officialDate || (s.date === game.officialDate && int(s.game.gameNumber) < int(game.gameNumber)));
+  const caught = new Map();
+  for (const s of splitsOf(catcherLog)) {
+    if (s && s.position && s.position.abbreviation === 'C' && s.stat && s.stat.gamesStarted === 1 && before(s)) caught.set(pkOf(s), teamOf(s));
+  }
+  let w = 0;
+  let l = 0;
+  for (const s of splitsOf(pitcherLog)) {
+    if (!s || !s.stat || s.stat.gamesStarted !== 1 || !before(s)) continue;
+    if (!caught.has(pkOf(s)) || caught.get(pkOf(s)) !== teamOf(s) || teamOf(s) === null) continue;
+    if (s.isWin === true) w += 1; else if (s.isWin === false) l += 1;
+  }
+  return { w, l };
+}
+
+// A player's season split for a group: the season total when he played for more than one team (the split without a
+// team), else his only split. Catchers: fielding at C only.
+function seasonSplit(person, group, position) {
+  const stats = person && Array.isArray(person.stats) ? person.stats : [];
+  const splits = stats.filter((s) => s && s.group && s.group.displayName === group).flatMap((s) => (Array.isArray(s.splits) ? s.splits : []))
+    .filter((sp) => !position || (sp.position && sp.position.abbreviation === position));
+  if (!splits.length) return null;
+  const total = splits.find((sp) => !sp.team);
+  const sp = total || splits[0];
+  return { stat: sp.stat || {}, teams: int(sp.numTeams) || 1 };
+}
+
+export function runningGame(person, kind) {
+  if (!person) return null;
+  const sp = seasonSplit(person, kind === 'pitcher' ? 'pitching' : 'fielding', kind === 'pitcher' ? null : 'C');
+  const st = sp ? sp.stat : {};
+  const out = { id: int(person.id), name: typeof person.fullName === 'string' ? person.fullName : null, sb: int(st.stolenBases), cs: int(st.caughtStealing) };
+  if (kind === 'pitcher') out.pickoffs = int(st.pickoffs);
+  out.teams = sp ? sp.teams : 1;
+  return out;
+}
+
+async function battery(pk) {
+  const [sched, box] = await Promise.all([gameCall(pk), getJSON('game/' + pk + '/boxscore')]);
+  const game = firstGame(sched);
+  if (!game) return null;
+  checkGame(game);
+  const state = stateOf(game);
+  const teams = (box && box.teams) || {};
+  // The starter once the game has started (the boxscore's first pitcher), the probable pitcher before that;
+  // the catcher by the boxscore's starting-catcher rule (null until the lineup is posted).
+  const who = {};
+  for (const side of ['away', 'home']) {
+    const t = trimTeam(teams[side]);
+    const prob = game.teams[side].probablePitcher;
+    const pitcher = t.pitcher ? { id: t.pitcher.id, name: t.pitcher.name }
+      : prob && int(prob.id) !== null ? { id: int(prob.id), name: typeof prob.fullName === 'string' ? prob.fullName : null } : null;
+    who[side] = { pitcher, catcher: t.catcher };
+  }
+  const ids = [];
+  for (const side of ['away', 'home']) for (const k of ['pitcher', 'catcher']) if (who[side][k] && who[side][k].id !== null) ids.push(who[side][k].id);
+  const log = (id, group) => (id === null || id === undefined ? Promise.resolve(null)
+    : getJSON('people/' + id + '/stats?stats=gameLog&group=' + group + '&season=' + game.season + '&gameType=R,F,D,L,W'));
+  const [pa, ca, ph, ch, people] = await Promise.all([
+    log(who.away.pitcher && who.away.pitcher.id, 'pitching'), log(who.away.catcher && who.away.catcher.id, 'fielding'),
+    log(who.home.pitcher && who.home.pitcher.id, 'pitching'), log(who.home.catcher && who.home.catcher.id, 'fielding'),
+    ids.length ? getJSON('people?personIds=' + ids.join(',') + '&hydrate=stats(group=[pitching,fielding],type=[season],season=' + game.season + ')') : Promise.resolve(null),
+  ]);
+  const person = (id) => (people && Array.isArray(people.people) ? people.people.find((p) => p && p.id === id) || null : null);
+  const side = (w, plog, clog) => {
+    const pitcher = w.pitcher ? runningGame(person(w.pitcher.id) || { id: w.pitcher.id, fullName: w.pitcher.name }, 'pitcher') : null;
+    const catcher = w.catcher ? runningGame(person(w.catcher.id) || { id: w.catcher.id, fullName: w.catcher.name }, 'catcher') : null;
+    return { pitcher, catcher, together: pitcher && catcher ? together(plog, clog, game) : null };
+  };
+  const body = { season: Number(game.season), away: side(who.away, pa, ca), home: side(who.home, ph, ch) };
+  const ttl = state === 'final' ? BATTERY_TTL.final : BATTERY_TTL.open;
+  return { body, edge: ttl, browser: ttl };
+}
+
+const ROUTES = { linescore, boxscore, series, standings, battery };
 
 // Cached: the stored copy keeps the edge lifetime in Cache-Control and the browser's max-age in its own header,
 // so a cache hit tells the browser the right max-age again.
@@ -210,8 +358,10 @@ async function cached(name, pk, method, ctx) {
   const key = new Request('https://' + name + '.cache/' + pk);
   const hit = await cache.match(key);
   if (hit) {
-    const age = Number(hit.headers.get('X-Browser-Max-Age')) || 10;
-    return reply(await hit.json(), 200, 'public, max-age=' + age, method);
+    const body = await hit.json();
+    // Copies stored before X-Browser-Max-Age existed: use the browser lifetime for the stored game state, then 10.
+    const age = Number(hit.headers.get('X-Browser-Max-Age')) || BROWSER_TTL[body && body.state] || 10;
+    return reply(body, 200, 'public, max-age=' + age, method);
   }
   let got;
   try {
@@ -235,7 +385,7 @@ export default {
     if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
     const method = request.method;
     if (method !== 'GET' && method !== 'HEAD') return error(405, 'method not allowed', method, { Allow: 'GET, HEAD' });
-    const m = /^\/api\/(linescore|boxscore|series)\/([^/]+)$/.exec(url.pathname);
+    const m = /^\/api\/(linescore|boxscore|series|standings|battery)\/([^/]+)$/.exec(url.pathname);
     if (!m) return error(404, 'not found', method);
     if (!/^\d{1,8}$/.test(m[2])) return error(400, 'gamePk must be 1 to 8 digits', method);
     return cached(m[1], m[2], method, ctx);

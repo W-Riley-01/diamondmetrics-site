@@ -234,7 +234,8 @@ def new_ctx(browser, w=1280, h=900, tz="America/New_York"):
     return browser.new_context(viewport={"width": w, "height": h}, timezone_id=tz, locale="en-US", device_scale_factor=1)
 
 
-WS5_API = {"linescore/849799": "linescore-849799.json", "boxscore/849799": "boxscore-849799.json", "series/849799": "series-849799.json"}
+WS5_API = {"linescore/849799": "linescore-849799.json", "boxscore/849799": "boxscore-849799.json", "series/849799": "series-849799.json",
+           "standings/849799": "standings-849799.json", "battery/849799": "battery-849799.json"}
 
 
 class Api:
@@ -476,6 +477,73 @@ def battery(pg):
     return pg.evaluate(BATTERY_JS)
 
 
+def ORD(n):
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+def GAMES(n):
+    s = str(int(n)) if float(n).is_integer() else str(n)
+    return s + (" game" if n == 1 else " games")
+
+
+def STAND(t):
+    """Expected [record, standings line] for one team from /api/standings, or [None, None] when it's missing."""
+    if not t:
+        return [None, None]
+    s = ("Tied for " if t["tied"] else "") + ORD(t["place"]) + " in the " + t["division"]
+    if t["place"] == 1 and not t["tied"] and t["lead"]:
+        s += f", {GAMES(t['lead'])} up"
+    elif t["place"] > 1:
+        s += f", {GAMES(t['gamesBack'])} back"
+    s += f". {t['divisionRecord']['w']}–{t['divisionRecord']['l']} in the division."
+    return [f"{t['wins']}–{t['losses']}", s]
+
+
+def BAT_LINE(tg):
+    if tg is None:
+        return None
+    return "First start together this season" if tg["w"] + tg["l"] == 0 else f"Battery {tg['w']}–{tg['l']} this season"
+
+
+def RUN(p, kind):
+    """Expected Running game row: the name, then the numbers."""
+    if kind == "pitcher":
+        s = f"{p['sb']} stolen, {p['cs']} caught, {p['pickoffs']} {'pickoff' if p['pickoffs'] == 1 else 'pickoffs'}"
+    elif p["sb"] + p["cs"] == 0:
+        s = "no attempts"
+    else:
+        s = f"{p['sb']} stolen, {p['cs']} caught, {int(HU(Decimal(p['cs']) * 100 / Decimal(p['sb'] + p['cs'])))}%"
+    return f"{p['name']} {s}" + (f" ({p['teams']} teams)" if p["teams"] > 1 else "")
+
+
+def EXTRAS(s, b):
+    """Expected board extras per team: [record, standings line, battery line] (None where hidden)."""
+    return [STAND(s[side] if s else None) + [BAT_LINE(b[side]["together"]) if b else None] for side in ("away", "home")]
+
+
+def RUNNING(b):
+    """Expected Running game rows per team (None when the block is hidden)."""
+    out = []
+    for side in ("away", "home"):
+        rows = [RUN(b[side][k], k) for k in ("pitcher", "catcher") if b and b[side][k]] if b else []
+        out.append(rows or None)
+    return out
+
+
+EXTRAS_JS = """() => [...document.querySelectorAll('.bd th.team')].map(th => [
+    ...['.rec', '.bl-st', '.bl-bat'].map(s => { const e = th.querySelector(s); return !e || e.hidden ? null : e.textContent.replace(/\\s+/g, ' ').trim(); })])"""
+RUNNING_JS = """() => [...document.querySelectorAll('.pit')].map(p => { const r = p.querySelector('.rg');
+    return !r || r.hidden ? null : [...r.querySelectorAll('.rg-row')].map(x => x.textContent.replace(/\\s+/g, ' ').trim()); })"""
+
+
+def extras(pg):
+    return pg.evaluate(EXTRAS_JS)
+
+
+def running(pg):
+    return pg.evaluate(RUNNING_JS)
+
+
 def strip(pg):
     """The series strip's lines, or None when it is hidden."""
     return pg.evaluate("(() => { const s = document.querySelector('.ser'); return !s || s.hidden ? null : [...s.querySelectorAll('p')].map(p => p.textContent.replace(/\\s+/g, ' ').trim()); })()")
@@ -615,7 +683,8 @@ def test_real(browser, base):
     check("real: every request is same-origin", all(u.startswith(origin) for u in log["requests"]), [u for u in log["requests"] if not u.startswith(origin)])
     check("real: every static response has the CSP header", all("content-security-policy" in h for u, _, h in log["responses"] if "/api/" not in u))
     check("real: no failed responses", all(s < 400 for _, s, _ in log["responses"]), [(u, s) for u, s, _ in log["responses"] if s >= 400])
-    check("real: each endpoint is requested once, for the WS5 game", sorted(pg.api.every) == [("boxscore", "849799"), ("linescore", "849799"), ("series", "849799")], pg.api.every)
+    check("real: each endpoint is requested once, for the WS5 game",
+          sorted(pg.api.every) == [(e, "849799") for e in ("battery", "boxscore", "linescore", "series", "standings")], pg.api.every)
     fonts_loaded = sorted(u.rsplit("/", 1)[1] for u in log["requests"] if u.endswith(".woff2"))
     check("real: both self-hosted fonts requested", fonts_loaded == ["big-shoulders-latin-wght-normal.woff2", "libre-franklin-latin-wght-normal.woff2"], fonts_loaded)
     check("real: fonts actually usable", pg.evaluate("document.fonts.check('800 20px \"Big Shoulders\"') && document.fonts.check('16px \"Libre Franklin\"')"))
@@ -729,8 +798,9 @@ def test_real(browser, base):
 
     # ---------- pitchers ----------
     check("pitchers: heading 'Starting pitchers' on the replay", tc(pg, ".pitchers h2") == ["Starting pitchers"], tc(pg, ".pitchers h2"))
-    check("pitchers: no 'Battery' heading and no sub line", pg.locator(".pitchers .subl").count() == 0
-          and not any(w in pg.evaluate("document.body.textContent") for w in ("Battery", "battery", "Chance each starter reaches a strikeout total.")))
+    check("pitchers: no 'Battery' heading and no sub line (the board's 'Battery 20–7 this season' is a record, not a heading)",
+          pg.locator(".pitchers .subl").count() == 0 and not any("attery" in t for t in tc(pg, "h1, h2, h3"))
+          and "Chance each starter reaches a strikeout total." not in pg.evaluate("document.body.textContent"), tc(pg, "h2"))
     check("pitchers: no SP or C lines in the section (they are on the board)", pg.locator(".pit .bl, .pit .pos").count() == 0
           and not any(t.startswith(("SP ", "C ")) for t in tc(pg, ".pit div, .pit p")))
     check("battery: no median or 'Threw' line", pg.locator(".pit .ks").count() == 0 and "Threw" not in pg.evaluate("document.querySelector('.pitchers').textContent"))
@@ -765,6 +835,27 @@ def test_real(browser, base):
     check("battery: WS5 SP and C on the board, and each starter's line (IP, H, BB, SO) in the section",
           battery(pg) == exp_b == [["SP Jacob Misiorowski", "C William Contreras", None, ["IP5.2", "H2", "BB1", "SO2"]],
                                    ["SP Drew Rasmussen", "C Liam Hicks", None, ["IP4.0", "H2", "BB0", "SO4"]]], (battery(pg), exp_b))
+    stf, btf = fixture("standings-849799.json"), fixture("battery-849799.json")
+    check("standings fixture (real API): Brewers 103-59, 1st NL Central, 14 up, 35-17; Rays 98-64, 1st AL East, 4.5 up, 28-24",
+          [(stf[s]["wins"], stf[s]["losses"], stf[s]["division"], stf[s]["place"], stf[s]["lead"], stf[s]["divisionRecord"]) for s in ("away", "home")]
+          == [(103, 59, "NL Central", 1, 14, {"w": 35, "l": 17}), (98, 64, "AL East", 1, 4.5, {"w": 28, "l": 24})], stf)
+    check("battery fixture (real API): 20-7 and 8-1 together; Hicks 58/11 over 2 teams",
+          [btf[s]["together"] for s in ("away", "home")] == [{"w": 20, "l": 7}, {"w": 8, "l": 1}] and btf["home"]["catcher"]["teams"] == 2, btf)
+    exp_x = EXTRAS(stf, btf)
+    check("board: records, standings lines and battery records",
+          extras(pg) == exp_x == [["103–59", "1st in the NL Central, 14 games up. 35–17 in the division.", "Battery 20–7 this season"],
+                                  ["98–64", "1st in the AL East, 4.5 games up. 28–24 in the division.", "Battery 8–1 this season"]], (extras(pg), exp_x))
+    check("board: the record sits beside the nickname, the standings line under it, the battery record under the C line",
+          pg.evaluate("""[...document.querySelectorAll('.bd th.team')].every(th => {
+              const n = th.querySelector('.nick').getBoundingClientRect(), r = th.querySelector('.rec').getBoundingClientRect();
+              const order = ['.nameline', '.bl-st', '.bl-sp', '.bl-c', '.bl-bat'].map(s => th.querySelector(s).getBoundingClientRect().top);
+              return r.left > n.right && Math.abs(r.bottom - n.bottom) < 8 && order.every((t, i) => i === 0 || t > order[i - 1]); })"""))
+    exp_r = RUNNING(btf)
+    check("starting pitchers: Running game rows (stolen, caught, pickoffs / caught-stealing %, '(2 teams)')",
+          running(pg) == exp_r == [["Jacob Misiorowski 2 stolen, 1 caught, 0 pickoffs", "William Contreras 48 stolen, 25 caught, 34%"],
+                                   ["Drew Rasmussen 23 stolen, 6 caught, 0 pickoffs", "Liam Hicks 58 stolen, 11 caught, 16% (2 teams)"]], (running(pg), exp_r))
+    check("starting pitchers: the Running game block is labelled and still has no SP or C labels",
+          tc(pg, ".pit .rg-l") == ["Running game", "Running game"] and pg.locator(".pit .pos, .pit .bl").count() == 0)
     check("battery: the starter's line sits under the strikeout O/U", pg.evaluate("[...document.querySelectorAll('.pit')].every(b => b.querySelector('.kou').compareDocumentPosition(b.querySelector('.pline')) & Node.DOCUMENT_POSITION_FOLLOWING)"))
 
     # ---------- lineups: every cell, every chip class, every check ----------
@@ -916,7 +1007,7 @@ def test_real(browser, base):
     # ---------- the score can't be fetched: same empty board, the rest of the page intact ----------
     for label, spec in (("500", 500), ("timeout", "hang")):
         ctx = new_ctx(browser)
-        pg, log = open_page(ctx, base, api=Api({"linescore/849799": spec, "boxscore/849799": spec, "series/849799": spec}), install=True)
+        pg, log = open_page(ctx, base, api=Api({f"{e}/849799": spec for e in ("linescore", "boxscore", "series", "standings", "battery")}), install=True)
         pg.wait_for_selector(".board")
         if spec == "hang":
             adv(pg, 10500)  # the page gives up after 10 seconds
@@ -925,6 +1016,7 @@ def test_real(browser, base):
         check(f"all endpoints {label}: no series strip, catchers not announced, no starter's line, page.json starters kept",
               strip(pg) is None and battery(pg) == [BATTERY(g, s, None, "final") for s in ("away", "home")]
               and battery(pg)[0] == ["SP Jacob Misiorowski", "C not announced", None, None], battery(pg))
+        check(f"all endpoints {label}: no record, standings line, battery record or Running game", extras(pg) == [[None] * 3] * 2 and running(pg) == [None, None], (extras(pg), running(pg)))
         check(f"all endpoints {label}: the rest of the page is unaffected",
               tc(pg, "h1") == [site_json["replay_title"]] and pg.locator(".bd .plate").count() == 6 and pg.locator("table.t tbody tr").count() == 18
               and pg.locator(".bts li").count() == 5 and tc(pg, ".bd-where") == ["Tropicana Field. Wednesday, October 28, 2026."]
@@ -945,6 +1037,22 @@ def test_real(browser, base):
     settle(pg, 300)
     check("series 500 alone: the strip stays hidden; line score and battery still shown",
           strip(pg) is None and pg.locator(".ser[hidden]").count() == 1 and ls_rows(pg) == LS(ws5, "MIL", "TB") and battery(pg)[0][1] == "C William Contreras", strip(pg))
+    ctx.close()
+    ctx = new_ctx(browser)
+    pg, log = open_page(ctx, base, api=Api({**WS5_API, "standings/849799": 500}))
+    pg.wait_for_selector(".rg:not([hidden])")
+    settle(pg, 300)
+    check("standings 500 alone: no record and no standings line; the battery record and Running game still shown",
+          [x[:2] for x in extras(pg)] == [[None, None]] * 2 and [x[2] for x in extras(pg)] == ["Battery 20–7 this season", "Battery 8–1 this season"]
+          and running(pg) == RUNNING(fixture("battery-849799.json")) and strip(pg) is not None, extras(pg))
+    ctx.close()
+    ctx = new_ctx(browser)
+    pg, log = open_page(ctx, base, api=Api({**WS5_API, "battery/849799": 500}))
+    pg.wait_for_selector(".bl-st:not([hidden])")
+    settle(pg, 300)
+    check("battery 500 alone: no battery record and no Running game; the records, standings and catchers still shown",
+          [x[2] for x in extras(pg)] == [None, None] and running(pg) == [None, None] and [x[:2] for x in extras(pg)] == [x[:2] for x in EXTRAS(fixture("standings-849799.json"), None)]
+          and battery(pg)[1][1] == "C Liam Hicks" and pg.locator(".pit .pline").count() == 2, (extras(pg), running(pg)))
     ctx.close()
 
     # ---------- timezone: the game date must not shift for a viewer far from the US ----------
@@ -1032,7 +1140,9 @@ def season_data():
 
 SEASON_API = {"1001": "linescore-preview.json", "1002": "linescore-live.json", "1003": "linescore-final-11.json",
               "boxscore/1001": "boxscore-preview.json", "boxscore/1002": "boxscore-live.json", "boxscore/1003": "boxscore-final-opener.json",
-              "series/1001": "series-first.json", "series/1002": "series-tied.json", "series/1003": "series-season-sweep.json"}
+              "series/1001": "series-first.json", "series/1002": "series-tied.json", "series/1003": "series-season-sweep.json",
+              "standings/1001": "standings-third.json", "standings/1002": "standings-tied.json", "standings/1003": "standings-missing.json",
+              "battery/1001": "battery-no-catcher.json", "battery/1002": "battery-live.json", "battery/1003": "battery-final-opener.json"}
 
 
 def board_plates(pg):
@@ -1090,7 +1200,7 @@ def test_season(browser):
         mini_cls = classes(pg, ".gm .mini")
         check("season: button win chances carry the board tier", mini_cls == [f"mini {BT(g['markets'][k], 'ml')}" for g in (g1, g2, g3) for k in ("away_win", "home_win")], mini_cls)
         check("season: only the selected game is requested, once from each endpoint on first load (hours before the preview window)",
-              sorted(pg.api.every) == [("boxscore", "1001"), ("linescore", "1001"), ("series", "1001")], pg.api.every)
+              sorted(pg.api.every) == [(e, "1001") for e in ("battery", "boxscore", "linescore", "series", "standings")], pg.api.every)
 
         # BTS: team nickname; a stat line only where a final box score has the player (game_id picks the game)
         exp_lines = [pick_line(p, d["games"]) for p in d["beat_the_streak"]]
@@ -1108,11 +1218,17 @@ def test_season(browser):
         check("season game 1: board numbers", board_plates(pg) == [[PCT(g1["markets"]["away_win"]), PCT(g1["markets"]["f5_away"]), v1[0]], [PCT(g1["markets"]["home_win"]), PCT(g1["markets"]["f5_home"]), v1[1]]], board_plates(pg))
         check("season game 1: O/U captions", tc(pg, ".bd .cap") == l1, tc(pg, ".bd .cap"))
         check("season: heading 'Starting pitchers' in season too, no sub line", tc(pg, ".pitchers h2") == ["Starting pitchers"] and pg.locator(".pitchers .subl").count() == 0
-              and "battery" not in pg.evaluate("document.body.textContent").lower(), tc(pg, ".pitchers h2"))
+              and not any("attery" in t for t in tc(pg, "h1, h2, h3")), tc(pg, ".pitchers h2"))
         bx1 = fixture("boxscore-preview.json")
         check("season game 1: the catcher shows before the game; 'C not announced' where the lineup isn't in; no line yet",
               battery(pg) == [BATTERY(g1, s, bx1, "preview") for s in ("away", "home")] == [["SP Jacob Misiorowski", "C not announced", None, None], ["SP Drew Rasmussen", "C Connor Wong", None, None]], battery(pg))
         check("season game 1: no 'null', 'undefined' or 'NaN' in the page", stray_words(pg) == [], stray_words(pg))
+        s1, b1 = fixture("standings-third.json"), fixture("battery-no-catcher.json")
+        check("season game 1: 3rd and 11 games back; 1 game up; no battery line without a catcher; a first start together",
+              extras(pg) == EXTRAS(s1, b1) == [["87–75", "3rd in the AL East, 11 games back. 30–22 in the division.", None],
+                                                ["92–70", "1st in the AL East, 1 game up. 40–12 in the division.", "First start together this season"]], (extras(pg), EXTRAS(s1, b1)))
+        check("season game 1: Running game with the probable pitchers; only the pitcher's row where no catcher is known",
+              running(pg) == RUNNING(b1) == [["Jacob Misiorowski 2 stolen, 1 caught, 0 pickoffs"], ["Drew Rasmussen 23 stolen, 6 caught, 0 pickoffs", "Connor Wong 30 stolen, 10 caught, 25%"]], running(pg))
         check("season game 1: first meeting", strip(pg) == SERIES_LINES(g1, fixture("series-first.json")) == ["Season series: first meeting"], strip(pg))
         check("season game 1: four unlit lamps before the game, no screen-reader verdict", lamps(pg) == lamps_expect(g1) and [s for _, s, _ in lamps(pg)] == ["unlit"] * 4, (lamps(pg), lamps_expect(g1)))
         check("season game 1: unlit lamps are plate green with the seam ring", set(pg.evaluate("[...document.querySelectorAll('.lr .lamp')].map(l => getComputedStyle(l).backgroundColor + ' ' + getComputedStyle(l).boxShadow)")) == {f"{UNLIT} rgb(43, 91, 70) 0px 0px 0px 2px inset"}, pg.evaluate("[...document.querySelectorAll('.lr .lamp')].map(l => getComputedStyle(l).boxShadow)"))
@@ -1162,6 +1278,13 @@ def test_season(browser):
               battery(pg) == [BATTERY(g2, s, bx2, "live") for s in ("away", "home")]
               == [["SP not announced", "C Shea Langeliers", "Started: JP Sears", ["IP5.1", "H4", "BB2", "SO6"]], ["SP Drew Rasmussen", "C Cal Raleigh", None, ["IP6.0", "H3", "BB1", "SO7"]]], battery(pg))
         check("season game 2 (live lines, a 'Started:' note): no 'null', 'undefined' or 'NaN' in the page", stray_words(pg) == [], stray_words(pg))
+        s2, b2 = fixture("standings-tied.json"), fixture("battery-live.json")
+        check("season game 2: tied for 3rd (2.5 back) and tied for 1st; battery records",
+              extras(pg) == EXTRAS(s2, b2) == [["80–82", "Tied for 3rd in the AL West, 2.5 games back. 20–25 in the division.", "Battery 3–4 this season"],
+                                                ["85–77", "Tied for 1st in the AL West. 28–24 in the division.", "Battery 12–9 this season"]], (extras(pg), EXTRAS(s2, b2)))
+        check("season game 2: no attempts against a catcher; '1 pickoff' and '(2 teams)' for a pitcher",
+              running(pg) == RUNNING(b2) == [["JP Sears 5 stolen, 0 caught, 1 pickoff (2 teams)", "Shea Langeliers no attempts"],
+                                              ["Drew Rasmussen 23 stolen, 6 caught, 0 pickoffs", "Cal Raleigh 60 stolen, 20 caught, 25%"]], running(pg))
         check("season game 2: tied series", strip(pg) == SERIES_LINES(g2, fixture("series-tied.json")) == ["Season series: tied 1–1"], strip(pg))
 
         # game 3: an 11-inning final, file dew point and elevation, WHIP
@@ -1181,6 +1304,12 @@ def test_season(browser):
               battery(pg) == [BATTERY(g3, s, bx3, "final") for s in ("away", "home")]
               == [["SP Jacob Misiorowski", "C Austin Wells", None, ["IP6.0", "H5", "BB2", "SO8"]], ["SP Drew Rasmussen", "C Carlos Narváez", "Started: Kevin Kelly", ["IP1.0", "H0", "BB0", "SO1"]]], battery(pg))
         check("season game 3 (final lines, an opener): no 'null', 'undefined' or 'NaN' in the page", stray_words(pg) == [], stray_words(pg))
+        s3, b3 = fixture("standings-missing.json"), fixture("battery-final-opener.json")
+        check("season game 3: a team missing from the standings shows no record or line; the other is 2nd, 5 games back",
+              extras(pg) == EXTRAS(s3, b3) == [["87–75", "2nd in the AL East, 5 games back. 30–22 in the division.", "Battery 5–2 this season"],
+                                                [None, None, "First start together this season"]], (extras(pg), EXTRAS(s3, b3)))
+        check("season game 3: the opener's Running game row is his own (the battery is the API's starter, not page.json's)",
+              running(pg) == RUNNING(b3) and running(pg)[1][0] == "Kevin Kelly 1 stolen, 0 caught, 0 pickoffs", running(pg))
         check("season game 3: completed season sweep and its series sweep",
               strip(pg) == SERIES_LINES(g3, fixture("series-season-sweep.json")) == ["Season series: Red Sox 3–0", "Red Sox swept a 3-game series, June 30–July 2.", "Red Sox swept the season series 3–0."], strip(pg))
         check("season game 3: lamps graded on page.json (Yankees won: green; Red Sox led after 5: red; 11 runs over 8.5: green; a run in the 1st: red)",
@@ -1236,7 +1365,7 @@ def test_season(browser):
         ctx.close()
 
         # one game at a time, each with its own line-score fixture
-        def one(game, spec, fixed="2026-04-14T14:00:00Z", install=False, box=None, series=None):
+        def one(game, spec, fixed="2026-04-14T14:00:00Z", install=False, box=None, series=None, more=None):
             dd = season_data()
             dd["games"] = [copy.deepcopy(game)]
             write_page(pj, dd)
@@ -1247,6 +1376,8 @@ def test_season(browser):
                 table["boxscore/" + pk] = box
             if series:
                 table["series/" + pk] = series
+            for ep, name in (more or {}).items():
+                table[ep + "/" + pk] = name
             p, lg = open_page(c, base, fixed=fixed, api=Api(table), install=install)
             p.wait_for_selector(".board")
             settle(p, 300)
@@ -1327,6 +1458,24 @@ def test_season(browser):
         check("polling live: stops once the game is final", (n4, pg.api.count(1002), pg.api.count(1002, "boxscore")) == (4, 4, 4), pg.api.every)
         check("polling live: the series is fetched once per game, not on the timer", pg.api.count(1002, "series") == 1, pg.api.every)
         check("polling live: the board shows the final line score", ls_rows(pg) == LS(fixture("linescore-final-x.json"), "ATH", "SEA") and pg.locator(".bd-live").count() == 0)
+        ctx.close()
+
+        # the battery: fetched on the first tick, not again while the boxscore's starters and catchers stay the same,
+        # and again when they change (here the Mariners' catcher); standings once per game
+        ctx, pg, _ = one(g2, "linescore-live.json", install=True, box="boxscore-live.json", more={"battery": "battery-live.json", "standings": "standings-tied.json"})
+        adv(pg, 30500)
+        adv(pg, 30500)
+        same = (pg.api.count(1002, "boxscore"), pg.api.count(1002, "battery"))
+        pg.api.table["boxscore/1002"] = "boxscore-live-new-catcher.json"
+        pg.api.table["battery/1002"] = "battery-live-new-catcher.json"
+        adv(pg, 30500)
+        settle(pg, 300)
+        changed = (pg.api.count(1002, "boxscore"), pg.api.count(1002, "battery"))
+        check("polling battery: once while the battery stays the same, again when the catcher changes; standings once",
+              same == (3, 1) and changed == (4, 2) and pg.api.count(1002, "standings") == 1, (same, changed, pg.api.every))
+        check("polling battery: the new catcher and his record with the pitcher show without a reload",
+              battery(pg)[1][1] == "C Harry Ford" and extras(pg)[1][2] == "Battery 2–0 this season" and running(pg)[1][1] == "Harry Ford 9 stolen, 3 caught, 25%",
+              (battery(pg), extras(pg), running(pg)))
         ctx.close()
 
         # live, tab hidden: no requests; visible again: one at once, then every 30 seconds

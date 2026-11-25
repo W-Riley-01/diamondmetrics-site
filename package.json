@@ -1,7 +1,8 @@
 {
   "name": "diamondmetrics-site",
   "private": true,
-  "description": "Static MLB predictions page plus a small Worker for the live line score. Nothing from npm is served.",
+  "type": "module",
+  "description": "Static MLB predictions page plus a small Worker for live data. Nothing from npm is served.",
   "scripts": {
     "dev": "wrangler dev",
     "test:worker": "node --test tests/worker.test.mjs"

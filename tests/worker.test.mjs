@@ -4,7 +4,7 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import worker, { trim, trimTeam, trimSeries } from '../worker/index.js';
+import worker, { trim, trimTeam, trimSeries, teamStanding, dayBefore, together, runningGame } from '../worker/index.js';
 
 const fx = (name) => JSON.parse(readFileSync(new URL('./fixtures/' + name, import.meta.url), 'utf8'));
 const WS5 = fx('upstream-849799.json');
@@ -12,6 +12,10 @@ const WS5_BOX = fx('upstream-boxscore-849799.json');
 const WS5_GAME = fx('upstream-game-849799.json');
 const WS5_REGULAR = fx('upstream-regular-158-139.json');
 const DH_REGULAR = fx('upstream-regular-doubleheader.json');
+const WS5_PROBABLE = fx('upstream-game-probable-849799.json');
+const STANDINGS_2026 = fx('upstream-standings-2026.json');
+const LOGS = Object.fromEntries([694819, 661388, 656876, 689414].map((id) => [id, fx(`upstream-log-${id}.json`)]));
+const PEOPLE_WS5 = fx('upstream-people-ws5.json');
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
 
@@ -24,6 +28,10 @@ function realRoutes() {
     [/game\/849799\/boxscore$/, () => json(WS5_BOX)],
     [/hydrate=seriesStatus&gamePk=849799$/, () => json(WS5_GAME)],
     [/season=2026&gameType=R&teamId=158&opponentId=139$/, () => json(WS5_REGULAR)],
+    [/hydrate=probablePitcher&gamePk=849799$/, () => json(WS5_PROBABLE)],
+    [/standings\?leagueId=103,104&season=2026&standingsTypes=regularSeason&hydrate=division$/, () => json(STANDINGS_2026)],
+    [/people\/(\d+)\/stats\?stats=gameLog&group=(pitching|fielding)&season=2026&gameType=R,F,D,L,W$/, (url) => json(LOGS[Number(/people\/(\d+)\//.exec(url)[1])])],
+    [/people\?personIds=694819,661388,656876,689414&hydrate=stats\(group=\[pitching,fielding\],type=\[season\],season=2026\)$/, () => json(PEOPLE_WS5)],
   ];
 }
 beforeEach(() => {
@@ -83,7 +91,7 @@ test('linescore WS5: the trimmed shape, and nothing else from upstream', async (
 });
 
 test('all endpoints: gamePk must be 1 to 8 digits, and bad ids never reach upstream', async () => {
-  for (const ep of ['linescore', 'boxscore', 'series']) {
+  for (const ep of ['linescore', 'boxscore', 'series', 'standings', 'battery']) {
     for (const bad of ['abc', '123456789', '12a', '-1', '1.5']) {
       const res = await get(`/api/${ep}/${bad}`);
       assert.equal(res.status, 400, ep + ' ' + bad);
@@ -95,7 +103,7 @@ test('all endpoints: gamePk must be 1 to 8 digits, and bad ids never reach upstr
 });
 
 test('all endpoints: GET and HEAD only', async () => {
-  for (const ep of ['linescore', 'boxscore', 'series']) {
+  for (const ep of ['linescore', 'boxscore', 'series', 'standings', 'battery']) {
     const head = await get(`/api/${ep}/849799`, 'HEAD');
     assert.equal(head.status, 200, ep);
     assert.equal(await head.text(), '');
@@ -120,7 +128,7 @@ test('other /api paths are 404; anything else goes to the assets', async () => {
 test('all endpoints: an unknown game is 404 and not cached', async () => {
   // the boxscore endpoint upstream answers 200 with empty teams for unknown games; the schedule call decides
   route(/game\/99999999\/boxscore$/, () => json({ teams: { away: {}, home: {} } }));
-  for (const ep of ['linescore', 'boxscore', 'series']) {
+  for (const ep of ['linescore', 'boxscore', 'series', 'standings', 'battery']) {
     const res = await get(`/api/${ep}/99999999`);
     assert.equal(res.status, 404, ep);
     checkHeaders(res);
@@ -140,6 +148,8 @@ test('all endpoints: upstream error, bad JSON and timeout are 502 and not cached
   const targets = [
     ['linescore', /hydrate=linescore/], ['boxscore', /sportId=1&gamePk=849799$/], ['boxscore', /boxscore$/],
     ['series', /hydrate=seriesStatus/], ['series', /gameType=R/],
+    ['standings', /hydrate=probablePitcher/], ['standings', /standings\?/],
+    ['battery', /hydrate=probablePitcher/], ['battery', /boxscore$/], ['battery', /people\/656876\/stats/], ['battery', /people\/689414\/stats/], ['battery', /people\?personIds/],
   ];
   for (const [ep, re] of targets) {
     for (const b of bad) {
@@ -339,4 +349,146 @@ test('series: an hour while meetings are left, a day once none are; a hit keeps 
   assert.equal(hit.headers.get('cache-control'), 'public, max-age=3600');
   checkHeaders(hit);
   assert.equal((await hit.json()).regular.left, 1);
+});
+
+// ======================= cache-hit fallback =======================
+test('a cached copy without X-Browser-Max-Age (stored by the round-4 Worker) uses the TTL for its state', async () => {
+  const old = (body) => new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'max-age=86400' } });
+  store.set('https://linescore.cache/849799', old({ state: 'final', detail: 'Final', inning: 9, half: 'bottom', outs: 3, innings: [], away: {}, home: {} }));
+  const fin = await get('/api/linescore/849799');
+  assert.equal(calls.length, 0, 'served from the old cached copy');
+  assert.equal(fin.headers.get('cache-control'), 'public, max-age=86400', 'not the 10-second fallback');
+  checkHeaders(fin);
+  store.set('https://linescore.cache/745010', old({ state: 'live', innings: [] }));
+  assert.equal((await get('/api/linescore/745010')).headers.get('cache-control'), 'public, max-age=10');
+  store.set('https://linescore.cache/745011', old({ state: 'preview', innings: [] }));
+  assert.equal((await get('/api/linescore/745011')).headers.get('cache-control'), 'public, max-age=300');
+  store.set('https://linescore.cache/745012', old({ innings: [] }));
+  assert.equal((await get('/api/linescore/745012')).headers.get('cache-control'), 'public, max-age=10', 'no state at all: 10');
+});
+
+// ======================= /api/standings =======================
+test('standings WS5: final regular-season standings for a postseason game, a day in the cache', async () => {
+  const res = await get('/api/standings/849799');
+  assert.equal(res.status, 200);
+  checkHeaders(res);
+  assert.equal(res.headers.get('cache-control'), 'public, max-age=86400');
+  assert.deepEqual(await res.json(), {
+    season: 2026, asOf: 'final',
+    away: { wins: 103, losses: 59, division: 'NL Central', place: 1, tied: false, gamesBack: 0, lead: 14, divisionRecord: { w: 35, l: 17 } },
+    home: { wins: 98, losses: 64, division: 'AL East', place: 1, tied: false, gamesBack: 0, lead: 4.5, divisionRecord: { w: 28, l: 24 } },
+  });
+  const st = calls.find((c) => /standings\?/.test(c.url)).url;
+  assert.ok(!/date=/.test(st), 'no date for a postseason game: ' + st);
+});
+
+test('standings: a regular-season game uses the standings going into its date (the day before), an hour', async () => {
+  const g = { gamePk: 745020, season: '2026', gameType: 'R', officialDate: '2026-04-01', gameNumber: 1, status: { abstractGameState: 'Preview' },
+    teams: { away: { team: { id: 139 } }, home: { team: { id: 158 } } } };
+  route(/hydrate=probablePitcher&gamePk=745020$/, () => json({ dates: [{ games: [g] }] }));
+  route(/standings\?.*&date=2026-03-31$/, () => json(STANDINGS_2026));
+  const res = await get('/api/standings/745020');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('cache-control'), 'public, max-age=3600');
+  const body = await res.json();
+  assert.equal(body.asOf, '2026-03-31');
+  assert.equal(body.away.division, 'AL East');
+  assert.ok(calls.some((c) => /standings\?leagueId=103,104&season=2026&standingsTypes=regularSeason&hydrate=division&date=2026-03-31$/.test(c.url)));
+  assert.equal(dayBefore('2026-03-01'), '2026-02-28');
+  assert.equal(dayBefore('2024-03-01'), '2024-02-29');
+  assert.equal(dayBefore('2027-01-01'), '2026-12-31');
+});
+
+test('standings: places come from games back, ties are ties (divisionRank never ties), lead only for a sole leader', () => {
+  const T = (id, w, l, gb, rank) => ({ team: { id }, wins: w, losses: l, divisionGamesBack: gb, divisionRank: rank, records: { divisionRecords: [{ division: { id: 205 }, wins: 1, losses: 1 }] } });
+  const data = { records: [{ division: { id: 205, nameShort: 'NL Central' }, teamRecords: [
+    T(1, 5, 1, '-', '1'), T(2, 4, 2, '1.0', '2'), T(3, 3, 3, '2.0', '3'), T(4, 3, 3, '2.0', '4'), T(5, 3, 3, '2.0', '5')] }] };
+  assert.deepEqual([1, 2, 3, 4, 5].map((id) => { const s = teamStanding(data, id); return [s.place, s.tied, s.gamesBack, s.lead]; }),
+    [[1, false, 0, 1], [2, false, 1, null], [3, true, 2, null], [3, true, 2, null], [3, true, 2, null]]);
+  const tiedTop = { records: [{ division: { id: 203, nameShort: 'NL West' }, teamRecords: [T(7, 6, 2, '-', '1'), T(8, 6, 2, '-', '2'), T(9, 4, 4, '2.0', '3')] }] };
+  assert.deepEqual([7, 8].map((id) => { const s = teamStanding(tiedTop, id); return [s.place, s.tied, s.lead]; }), [[1, true, null], [1, true, null]]);
+  assert.equal(teamStanding(tiedTop, 999), null, 'a team not in the standings');
+  assert.deepEqual(teamStanding(data, 1).divisionRecord, { w: 1, l: 1 });
+});
+
+// ======================= /api/battery =======================
+test('battery WS5: records together (gamePk and same team only) and the running game, a day once final', async () => {
+  const res = await get('/api/battery/849799');
+  assert.equal(res.status, 200);
+  checkHeaders(res);
+  assert.equal(res.headers.get('cache-control'), 'public, max-age=86400');
+  assert.deepEqual(await res.json(), {
+    season: 2026,
+    away: { pitcher: { id: 694819, name: 'Jacob Misiorowski', sb: 2, cs: 1, pickoffs: 0, teams: 1 }, catcher: { id: 661388, name: 'William Contreras', sb: 48, cs: 25, teams: 1 }, together: { w: 20, l: 7 } },
+    home: { pitcher: { id: 656876, name: 'Drew Rasmussen', sb: 23, cs: 6, pickoffs: 0, teams: 1 }, catcher: { id: 689414, name: 'Liam Hicks', sb: 58, cs: 11, teams: 2 }, together: { w: 8, l: 1 } },
+  });
+  assert.ok(calls.some((c) => /people\?personIds=694819,661388,656876,689414&hydrate=stats\(group=\[pitching,fielding\],type=\[season\],season=2026\)$/.test(c.url)), 'one call for all four players');
+});
+
+test('battery WS5 (real logs): the Rays doubleheader, Hicks for the Marlins, and the substitute game do not count', () => {
+  const game = WS5_PROBABLE.dates[0].games[0];
+  const pk = (log) => new Set(log.stats[0].splits.map((s) => s.game.gamePk));
+  // 22 Sep doubleheader: Hicks caught game 1 (823543), Rasmussen started game 2 (823494)
+  assert.ok(pk(LOGS[689414]).has(823543) && !pk(LOGS[656876]).has(823543));
+  assert.ok(pk(LOGS[656876]).has(823494) && !pk(LOGS[689414]).has(823494));
+  // 17 May: both started 822982, Hicks for the Marlins
+  const r = LOGS[656876].stats[0].splits.find((s) => s.game.gamePk === 822982);
+  const h = LOGS[689414].stats[0].splits.find((s) => s.game.gamePk === 822982);
+  assert.ok(r.stat.gamesStarted === 1 && h.stat.gamesStarted === 1 && h.position.abbreviation === 'C' && r.team.id !== h.team.id);
+  assert.deepEqual(together(LOGS[656876], LOGS[689414], game), { w: 8, l: 1 });
+  assert.deepEqual(together(LOGS[694819], LOGS[661388], game), { w: 20, l: 7 });
+});
+
+// Synthetic logs for the matching rules.
+const S = (pk, date, num, team, extra) => ({ date, gameType: 'R', isWin: true, team: { id: team }, game: { gamePk: pk, gameNumber: num }, stat: { gamesStarted: 1 }, ...extra });
+const plog = (...s) => ({ stats: [{ splits: s }] });
+const GAME = { gamePk: 900, officialDate: '2026-06-10', gameNumber: 2 };
+
+test('battery together: a doubleheader where the pitcher starts one game and the catcher the other does not count', () => {
+  const pitcher = plog(S(501, '2026-06-01', 2, 10));
+  const catcher = plog(S(500, '2026-06-01', 1, 10, { position: { abbreviation: 'C' } }));
+  assert.deepEqual(together(pitcher, catcher, GAME), { w: 0, l: 0 });
+});
+
+test('battery together: a DH start, a substitute at C and opposite teams do not count; the team result is isWin', () => {
+  const pitcher = plog(S(1, '2026-05-01', 1, 10), S(2, '2026-05-02', 1, 10), S(3, '2026-05-03', 1, 10), S(4, '2026-05-04', 1, 10, { isWin: false }), S(5, '2026-05-05', 1, 10, { stat: { gamesStarted: 0 } }));
+  const catcher = plog(
+    S(1, '2026-05-01', 1, 10, { position: { abbreviation: 'DH' } }),
+    S(2, '2026-05-02', 1, 10, { position: { abbreviation: 'C' }, stat: { gamesStarted: 0 } }),
+    S(3, '2026-05-03', 1, 11, { position: { abbreviation: 'C' } }),
+    S(4, '2026-05-04', 1, 10, { position: { abbreviation: 'C' } }),
+    S(5, '2026-05-05', 1, 10, { position: { abbreviation: 'C' } }));
+  assert.deepEqual(together(pitcher, catcher, GAME), { w: 0, l: 1 }, 'only game 4 counts (a loss); game 5 the pitcher came on in relief');
+});
+
+test('battery together: only games before this one (same date: a lower game number); this game never counts', () => {
+  const pitcher = plog(S(10, '2026-06-10', 1, 10), S(900, '2026-06-10', 2, 10), S(11, '2026-06-11', 1, 10), S(12, '2026-06-09', 1, 10, { gameType: 'D' }));
+  const catcher = plog(...[10, 900, 11].map((pk, i) => S(pk, ['2026-06-10', '2026-06-10', '2026-06-11'][i], [1, 2, 1][i], 10, { position: { abbreviation: 'C' } })), S(12, '2026-06-09', 1, 10, { position: { abbreviation: 'C' } }));
+  assert.deepEqual(together(pitcher, catcher, GAME), { w: 2, l: 0 }, 'game 1 of today and yesterday (any game type) count; this game and tomorrow do not');
+});
+
+test('battery running game: season total across teams, catcher from his C split only, zero attempts', () => {
+  const hicks = PEOPLE_WS5.people.find((p) => p.id === 689414);
+  assert.deepEqual(runningGame(hicks, 'catcher'), { id: 689414, name: 'Liam Hicks', sb: 58, cs: 11, teams: 2 });
+  const nobody = { id: 5, fullName: 'New Guy', stats: [{ group: { displayName: 'pitching' }, splits: [{ team: { id: 1 }, stat: { stolenBases: 0, caughtStealing: 0, pickoffs: 0 } }] }] };
+  assert.deepEqual(runningGame(nobody, 'pitcher'), { id: 5, name: 'New Guy', sb: 0, cs: 0, pickoffs: 0, teams: 1 });
+  const dhOnly = { id: 6, fullName: 'DH Guy', stats: [{ group: { displayName: 'fielding' }, splits: [{ team: { id: 1 }, position: { abbreviation: 'DH' }, stat: {} }] }] };
+  assert.deepEqual(runningGame(dhOnly, 'catcher'), { id: 6, name: 'DH Guy', sb: null, cs: null, teams: 1 });
+});
+
+test('battery: no catcher yet (lineup not posted) means no catcher and no record; the probable pitcher is used; an hour', async () => {
+  const g = { gamePk: 745030, season: '2026', gameType: 'R', officialDate: '2026-06-10', gameNumber: 1, status: { abstractGameState: 'Preview' },
+    teams: { away: { team: { id: 158 }, probablePitcher: { id: 694819, fullName: 'Jacob Misiorowski' } }, home: { team: { id: 139 } } } };
+  route(/hydrate=probablePitcher&gamePk=745030$/, () => json({ dates: [{ games: [g] }] }));
+  route(/game\/745030\/boxscore$/, () => json({ teams: { away: { pitchers: [], players: {} }, home: { pitchers: [], players: {} } } }));
+  route(/people\?personIds=694819&hydrate/, () => json({ people: [PEOPLE_WS5.people.find((p) => p.id === 694819)] }));
+  const res = await get('/api/battery/745030');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('cache-control'), 'public, max-age=3600');
+  assert.deepEqual(await res.json(), {
+    season: 2026,
+    away: { pitcher: { id: 694819, name: 'Jacob Misiorowski', sb: 2, cs: 1, pickoffs: 0, teams: 1 }, catcher: null, together: null },
+    home: { pitcher: null, catcher: null, together: null },
+  });
+  assert.ok(!calls.some((c) => /gameLog&group=fielding/.test(c.url)), 'no catcher log asked for');
 });

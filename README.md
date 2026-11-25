@@ -82,7 +82,31 @@ The starting pitcher is the first id in the team's `pitchers` list; the line is 
 - A sweep is a series (grouped by `seriesGameNumber`) of 2 or more games, all played, all won by one team. `seasonSweep` is the side (`"away"` or `"home"`, relative to this game) that has won every game played, or `null`.
 - `postseason` is `null` for a regular-season game. `result.leader` is `null` while the series is tied.
 
-**Rules for all three**
+**`/api/standings/{gamePk}`**: each team's record and division standing going into the game. From the game (`schedule?…&hydrate=probablePitcher&gamePk=`) and `standings?leagueId=103,104&season={season}&standingsTypes=regularSeason&hydrate=division`, with `date=` the day before the game's date for a regular-season game (`date=` includes that day's games) and no date for a postseason game (the final regular-season table).
+
+```
+{"season":2026,"asOf":"final",
+ "away":{"wins":103,"losses":59,"division":"NL Central","place":1,"tied":false,"gamesBack":0,"lead":14,"divisionRecord":{"w":35,"l":17}},
+ "home":{...}}
+```
+
+`place` comes from games back, not `divisionRank` (which never ties): 1 plus the number of teams with fewer games back, and equal games back is a tie. `lead` is set only for a sole division leader. A team not in the standings (before Opening Day) is `null`.
+
+**`/api/battery/{gamePk}`**: each team's battery, their record together this season, and stolen bases against each. The pitcher is the boxscore's first pitcher once the game has started, the probable pitcher before; the catcher follows the `/api/boxscore` rule (`null` until the lineup is posted). Then each player's game log (`people/{id}/stats?stats=gameLog&group=pitching|fielding&season={season}&gameType=R,F,D,L,W`, so postseason games count too) and one call for all four players' season stats (`people?personIds=…&hydrate=stats(group=[pitching,fielding],type=[season],season={season})`).
+
+```
+{"season":2026,
+ "away":{"pitcher":{"id":694819,"name":"Jacob Misiorowski","sb":2,"cs":1,"pickoffs":0,"teams":1},
+         "catcher":{"id":661388,"name":"William Contreras","sb":48,"cs":25,"teams":1},
+         "together":{"w":20,"l":7}},
+ "home":{...}}
+```
+
+- A start together is the same `gamePk` where the pitcher's split is a start, the catcher's split is a start at C (a DH start, or coming on as a substitute, doesn't count), and both splits are for the same team. The date is never used to pair them (a doubleheader where one starts game 1 and the other game 2 doesn't count); it's only used for "before this game": an earlier date, or the same date with a lower game number. Wins and losses are the team's result (`isWin`).
+- Stolen bases are this regular season's: for a player who played for more than one team, the season total (`teams` says how many). The catcher's come from his C split only.
+- No catcher yet: `catcher` and `together` are `null`.
+
+**Rules for all five**
 
 - `gamePk` must be 1 to 8 digits (400 otherwise). A game the API doesn't know is 404. An upstream error, bad JSON or no answer within 5 seconds (each upstream call) is 502. Other methods are 405. Other `/api/*` paths are 404.
 - Caching uses the Cache API:
@@ -91,15 +115,17 @@ The starting pitcher is the first id in the team's `pitchers` list; the line is 
   |---|---|---|
   | `/api/linescore`, `/api/boxscore` | final 24 h, live 15 s, preview 5 min | 86400, 10, 300 |
   | `/api/series` | 1 h; 24 h once the teams have no meetings left | 3600; 86400 |
+  | `/api/standings` | 1 h for a regular-season game; 24 h for a postseason game | 3600; 86400 |
+  | `/api/battery` | 1 h; 24 h once the game is final | 3600; 86400 |
 
-  The browser gets its own `max-age` again when the answer comes from the edge cache. Errors are `no-store` and not cached.
+  The browser gets its own `max-age` again when the answer comes from the edge cache (stored with the copy as `X-Browser-Max-Age`; copies stored before that header existed get the lifetime for their game state). Errors are `no-store` and not cached.
 - Worker responses don't get `_headers`, so the Worker sets its own: `Content-Type: application/json; charset=utf-8`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'`, `Referrer-Policy: strict-origin-when-cross-origin`.
 
 **How the page uses them**
 
-When a game's board renders, the page fetches all three (so the catcher shows even hours before first pitch). After that one timer refreshes the line score and the boxscore together: every 30 seconds while the API says the game is live, and every 5 minutes from 15 minutes before `start_time_utc`, so a preview game goes live without a reload. Nothing is fetched while the tab is hidden (it refreshes as soon as the tab is visible again), and the timer stops when the game is final, when `detail` starts with Postponed, Cancelled or Suspended, or when another game is picked. The series is fetched once per game. The out-of-town board uses page.json only.
+When a game's board renders, the page fetches all five (so the catcher shows even hours before first pitch). The series and the standings are fetched once per game; the battery again only when the boxscore's starters or catchers change (a lineup posted after the page opened). After that one timer refreshes the line score and the boxscore together: every 30 seconds while the API says the game is live, and every 5 minutes from 15 minutes before `start_time_utc`, so a preview game goes live without a reload. Nothing is fetched while the tab is hidden (it refreshes as soon as the tab is visible again), and the timer stops when the game is final, when `detail` starts with Postponed, Cancelled or Suspended, or when another game is picked. The series is fetched once per game. The out-of-town board uses page.json only.
 
-If an endpoint can't be fetched (an error, or no answer within 10 seconds), its part stays empty and nothing else changes: empty plates and dashes and page.json's top line for the line score, "C not announced" and no starter's line for the boxscore, no strip for the series. None of them grade the model: the result lamps and icons use page.json only, and page.json stays the source for the starters' names and every prediction.
+If an endpoint can't be fetched (an error, or no answer within 10 seconds), its part stays empty and nothing else changes: empty plates and dashes and page.json's top line for the line score, "C not announced" and no starter's line for the boxscore, no strip for the series, no record or standings line for the standings, no battery record or Running game for the battery. None of them grade the model: the result lamps and icons use page.json only, and page.json stays the source for the starters' names and every prediction.
 
 ## Preview on your computer
 
@@ -131,8 +157,8 @@ The site runs on Cloudflare Workers with static assets, not Pages. The Worker `d
   - NRFI: no run in the 1st when `no_run_first` is above 50% ("NRFI 55%", in its tier colour); otherwise YRFI with the other side of the number ("YRFI 55%", plain).
   - Exactly even (a chance of 0.5, or a tie for the top First 5 outcome) is no pick: "Winner even", "First 5 even", "Total 6.5 even" or "NRFI 50%", with no lamp.
   - Before and during the game the lamps are unlit. On a final game a lamp is green when the pick came true and red when it missed, with "Model's pick came true." / "Model's pick missed." for screen readers. If the result is `null` in page.json, that market has no lamp. Lamps are graded on page.json's `results` only, like the icons and checks below.
-- The battery is on the board: under each team name, "SP" and the starter's name from page.json, and "C" and the starting catcher from `/api/boxscore` ("C not announced" until the lineup is in), labels in #C9D6CE and names in #F4F5F0.
-- Starting pitchers (the section below Total runs): each team's starter by name, his strikeout O/U, and once the game has started his line as four stat blocks (IP, H, BB, SO); if the API's starter isn't page.json's (an opener, a late scratch), a "Started: [name]" note sits above the line. The strikeout O/U is picked like the total runs line. `k_over[n]` is the chance of n or more strikeouts, the over on line n − 0.5; the line is the one closest to 50% (higher on a tie), shown as "Strikeouts O/U 6.5", "Over 50%", "Under 50%" (the under is 100 minus the over). Then the 3+ to 7+ ladder, and the first-inning record as stat blocks: NRFI record (scoreless-not scoreless), ERA, OBP, and WHIP when the data has it. With no first-inning data, a sentence says so.
+- Each team on the board: the record beside the nickname ("Brewers 103–59"; it drops under the name when the column is narrow), the standing under it ("1st in the NL Central, 14 games up. 35–17 in the division.", "3rd in the AL East, 11 games back. …", "Tied for 1st in the NL West. …", "Tied for 3rd in the AL West, 2.5 games back. …"), then the battery: "SP" and the starter's name from page.json, "C" and the starting catcher from `/api/boxscore` ("C not announced" until the lineup is in), labels in #C9D6CE and names in #F4F5F0, and their record together ("Battery 20–7 this season", or "First start together this season"; no line while the catcher isn't known).
+- Starting pitchers (the section below Total runs): each team's starter by name, his strikeout O/U, and once the game has started his line as four stat blocks (IP, H, BB, SO); if the API's starter isn't page.json's (an opener, a late scratch), a "Started: [name]" note sits above the line. Then "Running game": the pitcher ("Jacob Misiorowski 2 stolen, 1 caught, 0 pickoffs") and the catcher ("William Contreras 48 stolen, 25 caught, 34%", caught-stealing % rounded half up, or "no attempts"), with "(2 teams)" when a season total covers more than one team. The strikeout O/U is picked like the total runs line. `k_over[n]` is the chance of n or more strikeouts, the over on line n − 0.5; the line is the one closest to 50% (higher on a tie), shown as "Strikeouts O/U 6.5", "Over 50%", "Under 50%" (the under is 100 minus the over). Then the 3+ to 7+ ladder, and the first-inning record as stat blocks: NRFI record (scoreless-not scoreless), ERA, OBP, and WHIP when the data has it. With no first-inning data, a sentence says so.
 - Once a game is final, the lineup tables mark each batter prop that came true (read from `results.batters` by player id) with a 14px icon in `--ok` (#1A5E37, drawn in `currentColor`), each an image with words for screen readers: a bat (a filled shape, knob and thin handle out to a rounded barrel) for 1+ hit ("got a hit"), a check for 2+ total bases ("two or more bases"), a baseball for 1+ homer ("homered"), home plate for 1+ RBI ("drove in a run"), and a base for 1+ steal ("stole a base"). Check marks also follow each total-runs line the game went over and each strikeout total the starter reached.
 - Home run conditions: the score bar's label is the tier (for example "Neutral (Dome)") and the score out of 100. An open-air park also shows temperature, humidity, dew point, wind (with `wind_label` under it), elevation and carry. Dew point is `dew_point_f` when present, otherwise Magnus from temperature and humidity with the engine's constants (6.1078, 7.5, 237.3), rounded to a whole °F. Elevation is `elevation_ft` when present, otherwise the home park's `elevation_m` from `STADIUM_INFO` in the engine's `weather.py`, converted to feet and rounded to the nearest 10. A park not in that table (right now the Athletics, code `ATH`) shows no elevation. When the engine's table changes, copy the new values into `ELEV_M` in `app.js`.
 - Beat the Streak shows each pick's team nickname and, once his game is final, his stat line for the night.

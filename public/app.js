@@ -221,6 +221,8 @@
   const getLineScore = (pk) => getApi('linescore', pk, (b) => typeof b.state === 'string' && Array.isArray(b.innings));
   const getBoxScore = (pk) => getApi('boxscore', pk, (b) => typeof b.state === 'string' && b.away && b.home);
   const getSeries = (pk) => getApi('series', pk, (b) => b.regular && typeof b.regular === 'object');
+  const getStandings = (pk) => getApi('standings', pk, (b) => 'away' in b && 'home' in b);
+  const getBattery = (pk) => getApi('battery', pk, (b) => b.away && b.home && typeof b.away === 'object' && typeof b.home === 'object');
 
   // ---------- Opening Day countdown ----------
   function renderBanner(site) {
@@ -401,6 +403,37 @@
       h('tbody', null, row('away'), row('home')));
   }
 
+  // "14 games", "4.5 games", "1 game".
+  const gamesText = (n) => String(n) + (n === 1 ? ' game' : ' games');
+
+  // "1st in the NL Central, 14 games up. 35–17 in the division." / "3rd in the AL East, 11 games back. ..." /
+  // "Tied for 1st in the NL West. ..." / "Tied for 3rd in the AL East, 2 games back. ..."
+  function standingLine(t) {
+    if (!t || !ok(t.place) || typeof t.division !== 'string') return null;
+    let s = (t.tied ? 'Tied for ' : '') + ordinal(t.place) + ' in the ' + t.division;
+    if (t.place === 1 && !t.tied && ok(t.lead) && t.lead > 0) s += ', ' + gamesText(t.lead) + ' up';
+    else if (t.place > 1 && ok(t.gamesBack)) s += ', ' + gamesText(t.gamesBack) + ' back';
+    s += '.';
+    const dr = t.divisionRecord;
+    if (dr && ok(dr.w) && ok(dr.l)) s += ' ' + dr.w + '–' + dr.l + ' in the division.';
+    return s;
+  }
+
+  // A Running game row's numbers: pitcher "2 stolen, 1 caught, 0 pickoffs"; catcher "48 stolen, 25 caught, 34%" or
+  // "no attempts"; "(2 teams)" when the season total covers more than one team.
+  function runningText(p, kind) {
+    if (!p || !ok(p.sb) || !ok(p.cs)) return 'no stats yet';
+    let s;
+    if (kind === 'pitcher') {
+      s = p.sb + ' stolen, ' + p.cs + ' caught, ' + (ok(p.pickoffs) ? p.pickoffs : 0) + (p.pickoffs === 1 ? ' pickoff' : ' pickoffs');
+    } else if (p.sb + p.cs === 0) {
+      s = 'no attempts';
+    } else {
+      s = p.sb + ' stolen, ' + p.cs + ' caught, ' + Math.round(Number(((p.cs * 100) / (p.sb + p.cs)).toPrecision(12))) + '%';
+    }
+    return s + (ok(p.teams) && p.teams > 1 ? ' (' + p.teams + ' teams)' : '');
+  }
+
   // The season series strip: each entry is [label or null, text].
   function seriesLines(g, s) {
     const out = [];
@@ -506,21 +539,30 @@
       return plate(wholePct(over ? ou.over : 100 - ou.over), 'b-plain', (over ? 'Over ' : 'Under ') + ou.line);
     }
 
-    // The battery under each team name: the starter from page.json, the catcher from the boxscore (filled in later).
+    // Under each team name: its record and standing (from /api/standings), the battery (SP from page.json, C from the
+    // boxscore) and the battery's record together (from /api/battery). The API parts are filled in later, or stay
+    // hidden if they can't be fetched.
     const bline = (pos, name) => [h('span', { class: 'pos' }, pos), ' ', h('span', { class: 'who' }, name)];
-    const catchers = {
-      away: h('span', { class: 'bl bl-c' }, bline('C', 'not announced')),
-      home: h('span', { class: 'bl bl-c' }, bline('C', 'not announced')),
-    };
+    const slots = {};
+    for (const side of ['away', 'home']) {
+      slots[side] = {
+        rec: h('span', { class: 'rec', hidden: true }),
+        stand: h('span', { class: 'bl bl-st', hidden: true }),
+        catcher: h('span', { class: 'bl bl-c' }, bline('C', 'not announced')),
+        bat: h('span', { class: 'bl bl-bat', hidden: true }),
+      };
+    }
 
     function row(side) {
       const team = g[side + '_team'];
       const st = g.starters && g.starters[side];
       return h('tr', null,
         h('th', { scope: 'row', class: 'team' },
-          h('span', { class: 'nick' }, nick(team)),
+          h('span', { class: 'nameline' }, h('span', { class: 'nick' }, nick(team)), slots[side].rec),
+          slots[side].stand,
           h('span', { class: 'bl bl-sp' }, bline('SP', st && st.name ? st.name : 'not announced')),
-          catchers[side]),
+          slots[side].catcher,
+          slots[side].bat),
         h('td', { 'data-label': 'Odds to win' }, plate(pct(m[side + '_win']), btier(m[side + '_win'], 'ml'))),
         h('td', { 'data-label': 'First 5 winner' }, plate(pct(m['f5_' + side]), btier(m['f5_' + side], 'f5'))),
         h('td', { 'data-label': 'Total runs O/U' }, ouCell(side)));
@@ -565,7 +607,26 @@
     el.setCatchers = (box) => {
       for (const side of ['away', 'home']) {
         const c = box[side] && box[side].catcher && typeof box[side].catcher.name === 'string' ? box[side].catcher.name : null;
-        catchers[side].replaceChildren(...bline('C', c || 'not announced'));
+        slots[side].catcher.replaceChildren(...bline('C', c || 'not announced'));
+      }
+    };
+    el.setStandings = (s) => {
+      for (const side of ['away', 'home']) {
+        const t = s[side];
+        const rec = t && ok(t.wins) && ok(t.losses) ? t.wins + '–' + t.losses : null;
+        slots[side].rec.replaceChildren(rec || '');
+        slots[side].rec.hidden = !rec;
+        const line = standingLine(t);
+        slots[side].stand.replaceChildren(line || '');
+        slots[side].stand.hidden = !line;
+      }
+    };
+    el.setBattery = (b) => {
+      for (const side of ['away', 'home']) {
+        const t = b[side] && b[side].together;
+        const line = t && ok(t.w) && ok(t.l) ? (t.w + t.l === 0 ? 'First start together this season' : 'Battery ' + t.w + '–' + t.l + ' this season') : null;
+        slots[side].bat.replaceChildren(line || '');
+        slots[side].bat.hidden = !line;
       }
     };
     el.setSeries = (s) => {
@@ -662,6 +723,8 @@
     const res = finalResults(g);
     const threw = res && res.starter_k && ok(res.starter_k[side]) ? res.starter_k[side] : null;
     const lineSlot = h('div', { class: 'pline-slot' });
+    // Running game: stolen bases against the pitcher and the catcher this season (from /api/battery); hidden until then.
+    const running = h('div', { class: 'rg', hidden: true });
     const kl = p ? kLine(p.k_over) : null;
     const ladder = p ? Object.keys(p.k_over || {}).sort((a, b) => Number(a) - Number(b)) : [];
     const f = p ? p.first_inning : null;
@@ -674,6 +737,7 @@
           h('span', null, 'Over ', h('b', null, wholePct(kl.over))),
           h('span', null, 'Under ', h('b', null, wholePct(100 - kl.over))))) : null,
       lineSlot,
+      running,
       p ? h('div', { class: 'ladder' }, ladder.map((k) => h('div', { class: 'rung' },
         h('div', { class: 'l' }, k + '+ K'),
         h('div', { class: 'v' }, pcell(p.k_over[k], 'k' + k)),
@@ -687,6 +751,14 @@
             stat('OBP', dot3(f.opp_obp)),
             ok(f.whip) ? stat('WHIP', fix2(f.whip)) : null))
         : h('p', { class: 'fi-none' }, 'First-inning record not shown (fewer than 5 starts).'));
+    el.setRunning = (b) => {
+      const rows = [];
+      for (const [who, kind] of [[b && b.pitcher, 'pitcher'], [b && b.catcher, 'catcher']]) {
+        if (who && typeof who.name === 'string') rows.push(h('p', { class: 'rg-row' }, h('span', { class: 'rg-name' }, who.name), ' ', runningText(who, kind)));
+      }
+      running.replaceChildren(...(rows.length ? [h('div', { class: 'rg-l' }, 'Running game'), ...rows] : []));
+      running.hidden = rows.length === 0;
+    };
     el.setLine = (t, state) => {
       const sp = t && t.pitcher && typeof t.pitcher.name === 'string' ? t.pitcher : null;
       const line = sp && sp.line && typeof sp.line.ip === 'string' ? sp.line : null;
@@ -773,13 +845,16 @@
   }
 
   // ---------- live data for the selected game ----------
-  // One game at a time, one timer: each tick fetches the line score and the boxscore together. The series is fetched
-  // once per game. gen changes on every game switch, so a late answer for the old game is dropped.
+  // One game at a time, one timer: each tick fetches the line score and the boxscore together. The series and the
+  // standings are fetched once per game; the battery on the first tick, and again only when the boxscore's starters
+  // or catchers change (a lineup posted after the page opened). gen changes on every game switch, so a late answer for
+  // the old game is dropped.
   function liveScore() {
     let gen = 0;
     let timer = null;
     let due = null;  // the next refresh, kept while the tab is hidden: { my, g, view }
     let last = null; // the last state the API gave for this game
+    let who = null;  // the starters and catchers the battery was last fetched for
 
     // Milliseconds until the next refresh, or null for none.
     function nextDelay(g, ls) {
@@ -810,6 +885,9 @@
         view.pitchers.away.setLine(box.away, state);
         view.pitchers.home.setLine(box.home, state);
       }
+      const id = (x) => (x && ok(x.id) ? x.id : null);
+      const key = box ? JSON.stringify(['away', 'home'].map((s) => [id(box[s].pitcher), id(box[s].catcher)])) : who || 'unknown';
+      if (key !== who) { who = key; loadBattery(my, g, view); }
       const next = nextDelay(g, ls);
       if (next === null) return;
       due = { my, g, view };
@@ -819,6 +897,19 @@
     async function loadSeries(my, g, view) {
       const s = await getSeries(g.game_id);
       if (my === gen && s) view.board.setSeries(s);
+    }
+
+    async function loadStandings(my, g, view) {
+      const s = await getStandings(g.game_id);
+      if (my === gen && s) view.board.setStandings(s);
+    }
+
+    async function loadBattery(my, g, view) {
+      const b = await getBattery(g.game_id);
+      if (my !== gen || !b) return;
+      view.board.setBattery(b);
+      view.pitchers.away.setRunning(b.away);
+      view.pitchers.home.setRunning(b.home);
     }
 
     // Hidden tab: no requests. Visible again: refresh at once, then carry on.
@@ -834,8 +925,10 @@
         timer = null;
         due = null;
         last = null;
+        who = null;
         load(gen, g, view);
         loadSeries(gen, g, view);
+        loadStandings(gen, g, view);
       },
     };
   }
