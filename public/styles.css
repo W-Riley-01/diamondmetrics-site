@@ -139,12 +139,12 @@ h1 + .upd { margin-top: 14px; }
 .bd .team { padding-right: 24px; }
 .nick { display: block; font-family: var(--display); font-weight: 800; font-size: 48px; line-height: 1; color: var(--white); white-space: nowrap; }
 .pitch { display: block; margin-top: 6px; font-size: 14px; font-weight: 400; color: var(--label); white-space: nowrap; }
+.ou-l { margin-bottom: 5px; font-size: 13px; line-height: 1.2; color: var(--label); white-space: nowrap; }
 
-.lamprow { margin-top: 14px; padding-top: 14px; border-top: 2px solid var(--seam); display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 24px; }
-.lr { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 28px; font-size: 15px; color: var(--white); }
-.lr li { display: inline-flex; align-items: center; gap: 8px; }
+.lamprow { margin-top: 14px; padding-top: 14px; border-top: 2px solid var(--seam); }
+.lr-nr { font-size: 15px; color: var(--white); }
+.lr-nr .lamp { margin-right: 8px; vertical-align: -1px; }
 .num { font-family: var(--display); font-weight: 800; font-size: 22px; line-height: 1; }
-.lr-note { font-size: 13px; color: var(--label); }
 
 /* ---------- below the board ---------- */
 .cols { margin-top: 48px; display: flex; flex-wrap: wrap; gap: 48px; align-items: flex-start; }
@@ -154,6 +154,7 @@ h1 + .upd { margin-top: 14px; }
 .sec h2 { margin: 0; font-family: var(--display); font-weight: 800; font-size: 34px; line-height: 1.05; color: var(--board); }
 .subl { margin-top: 6px; font-size: 16px; color: var(--muted); }
 .sec > .subl { margin-bottom: 18px; }
+.sec > h2 + .cond-note, .sec > h2 + .wx { margin-top: 14px; }
 
 /* probability chips in tables: strong = yellow on a plate, watch = ink, low = grey */
 .p { display: inline-block; font-weight: 600; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
@@ -163,11 +164,14 @@ h1 + .upd { margin-top: 14px; }
 .ck { display: inline-flex; align-items: center; width: 18px; justify-content: flex-end; vertical-align: middle; }
 .ck svg { display: block; }
 
-/* conditions */
+/* readings: home run conditions and first-inning stats */
+.wx, .stats { display: flex; flex-wrap: wrap; gap: 14px 40px; }
+.stats { gap: 10px 32px; }
+.wx .k, .stats .k { font-size: 13px; color: var(--muted); }
+.wx .v, .stats .v { margin-top: 2px; font-weight: 600; font-size: 17px; }
+.wx .note { margin-top: 2px; font-size: 13px; color: var(--muted); }
 .cond-note { font-size: 16px; }
-.wx { display: flex; flex-wrap: wrap; gap: 14px 40px; }
-.wx .k { font-size: 13px; color: var(--muted); }
-.wx .v { margin-top: 2px; font-weight: 600; font-size: 17px; }
+.cond-note.dome { font-weight: 600; }
 .hrbox { margin-top: 20px; max-width: 640px; }
 .hrrow { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; font-size: 15px; }
 .hrnum { font-weight: 700; }
@@ -194,7 +198,9 @@ h1 + .upd { margin-top: 14px; }
 .rung .l { font-size: 13px; color: var(--muted); }
 .rung .v { margin-top: 4px; }
 .rung .ck { width: auto; height: 18px; margin-top: 2px; justify-content: center; display: flex; }
-.pit .first { margin-top: 12px; font-size: 14px; line-height: 1.5; color: var(--muted); }
+.fi { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--rule); }
+.fi-l { margin-bottom: 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.fi-none { margin-top: 12px; font-size: 14px; line-height: 1.5; color: var(--muted); }
 
 /* lineups */
 .lu + .lu { margin-top: 32px; }
@@ -218,16 +224,11 @@ table.t.fin { min-width: 760px; }
 .bts .rk { font-family: var(--display); font-weight: 800; font-size: 28px; line-height: 1; color: var(--board); }
 .bts .name { font-weight: 600; }
 .bts .meta { font-size: 14px; color: var(--muted); }
+.bts .line { margin-left: 10px; font-weight: 600; color: var(--ink); }
 .bts .p { font-size: 18px; }
 
-/* rail: reading guide */
-.guide { border-top: 3px solid var(--board); padding-top: 14px; }
-.sec.guide h2 { font-size: 24px; }
-.guide > p { margin-top: 8px; font-size: 15px; line-height: 1.5; }
-.legend { margin: 12px 0 0; padding: 0; list-style: none; display: grid; row-gap: 8px; font-size: 15px; }
-.legend li { display: grid; grid-template-columns: 52px 1fr; align-items: baseline; column-gap: 10px; }
-.legend .p { justify-self: start; }
-.how { margin-top: 14px; }
+/* rail: cut-offs */
+.how { margin-top: 32px; border-top: 3px solid var(--board); padding-top: 4px; }
 .how summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; gap: 10px; list-style: none; font-weight: 600; color: var(--board); }
 .how summary::-webkit-details-marker { display: none; }
 /* display:flex hides the built-in triangle, so draw one; it turns down when open */
@@ -235,7 +236,8 @@ table.t.fin { min-width: 760px; }
 .how[open] summary::before { transform: rotate(90deg); }
 .how summary:hover { color: var(--hover); }
 .how p { margin-top: 10px; font-size: 14px; line-height: 1.55; color: var(--muted); }
-.how table { margin-top: 6px; width: 100%; border-collapse: collapse; font-size: 14px; }
+.how p.key { margin-top: 4px; color: var(--ink); }
+.how table { margin-top: 10px; width: 100%; border-collapse: collapse; font-size: 14px; }
 .how th { text-align: left; padding: 6px 0; font-weight: 600; color: var(--muted); border-bottom: 2px solid var(--board); }
 .how td { padding: 5px 0; border-bottom: 1px solid var(--rule); }
 .how .r { text-align: right; }
@@ -281,11 +283,12 @@ footer .wrap { padding-top: 28px; padding-bottom: 28px; display: flex; flex-wrap
   .nick { font-size: 38px; }
   .plate { font-size: 38px; padding: 6px 8px 4px; }
   .plate .pc { font-size: 19px; }
-  .cap { font-size: 12px; }
+  .cap, .ou-l { font-size: 12px; }
   .lamprow { margin-top: 4px; }
 
   .cols { margin-top: 36px; }
   .sec h2 { font-size: 30px; }
+  .wx { gap: 14px 28px; }
   .ladder { gap: 4px; }
   .tot-row { grid-template-columns: 72px 1fr 44px 18px; column-gap: 8px; }
 }

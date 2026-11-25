@@ -20,13 +20,20 @@ def check(name, ok, detail=""):
 
 
 # ---------- independent expectations ----------
+def HU(d, q="1"):
+    return Decimal(d).quantize(Decimal(q), rounding=ROUND_HALF_UP)
+
+
 def W(p):
-    return int((Decimal(str(p)) * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    return int(HU(Decimal(str(p)) * 100))
+
+
+def WP(r):
+    return "<1%" if r <= 0 else ">99%" if r >= 100 else f"{r}%"
 
 
 def PCT(p):
-    r = W(p)
-    return "<1%" if r <= 0 else ">99%" if r >= 100 else f"{r}%"
+    return WP(W(p))
 
 
 # thresholds copied from the original app.py (PROP_THRESHOLDS, K_PROP_THRESHOLDS, GAME_THRESHOLDS)
@@ -51,10 +58,44 @@ def RUNS(x):
     return s + (" run" if d == 1 else " runs")
 
 
+def OU(total_over):
+    """Board total: the .5 line whose over chance is closest to 0.5 (ties go to the higher line), as
+    [label over, label under, over shown, under shown]; the pair adds to 100."""
+    cands = [(abs(Decimal(str(p)) - Decimal("0.5")), -Decimal(k), k, p) for k, p in total_over.items() if k.endswith(".5")]
+    _, _, k, p = min(cands)
+    over = W(p)
+    return [f"Over {k}", f"Under {k}"], [WP(over), WP(100 - over)]
+
+
+def DEW(temp_f, rh):
+    """Dew point in whole °F by Magnus with the engine's constants (7.5, 237.3), all in Decimal."""
+    t = (Decimal(str(temp_f)) - 32) * 5 / 9
+    g = (Decimal(str(rh)) / 100).log10() + Decimal("7.5") * t / (t + Decimal("237.3"))
+    td = Decimal("237.3") * g / (Decimal("7.5") - g)
+    return int(HU(td * 9 / 5 + 32))
+
+
+# elevation_m from STADIUM_INFO in MLB_Analysis/weather.py, for the parks the tests use
+ELEV_M = {"BOS": 6, "TB": 13, "SEA": 6}
+
+
+def FT(m):
+    return int(HU(Decimal(m) * Decimal("3.28084") / 10)) * 10
+
+
+def DOT3(x):
+    return str(HU(Decimal(str(x)), "0.001"))[1:]
+
+
+def FIX2(x):
+    return str(HU(Decimal(str(x)), "0.01"))
+
+
 CODE = {"Milwaukee Brewers": "MIL", "Tampa Bay Rays": "TB", "New York Yankees": "NYY", "Boston Red Sox": "BOS",
         "Athletics": "ATH", "Seattle Mariners": "SEA"}
 NICK = {"Milwaukee Brewers": "Brewers", "Tampa Bay Rays": "Rays", "New York Yankees": "Yankees", "Boston Red Sox": "Red Sox",
         "Athletics": "Athletics", "Seattle Mariners": "Mariners"}
+KEY_LINE = "Yellow numbers on a green plate clear the strong cut-off, plain numbers clear the watch line, and grey numbers fall below it."
 
 
 def norm(s):
@@ -84,11 +125,6 @@ def open_page(ctx, url, fixed="2026-11-18T17:00:00Z"):  # clock times are UTC, s
     return pg, log
 
 
-def page_msgs(log):
-    """Every console message; any one fails the check."""
-    return log["console"]
-
-
 def tc(pg, sel):
     """textContent of every match, whitespace collapsed (includes screen-reader-only text)."""
     return [norm(x) for x in pg.locator(sel).all_text_contents()]
@@ -96,6 +132,10 @@ def tc(pg, sel):
 
 def classes(pg, sel):
     return pg.eval_on_selector_all(sel, "els => els.map(e => e.className)")
+
+
+def css(pg, sel, prop):
+    return pg.evaluate("([s, p]) => getComputedStyle(document.querySelector(s))[p]", [sel, prop])
 
 
 def no_hscroll(pg):
@@ -129,6 +169,28 @@ def lineup_expect(g, side, by_id):
     return rows, checks
 
 
+def fi_expect(fi):
+    out = [f"NRFI record{fi['scoreless']}-{fi['not_scoreless']}", f"ERA{FIX2(fi['era'])}", f"OBP{DOT3(fi['opp_obp'])}"]
+    if fi.get("whip") is not None:
+        out.append(f"WHIP{FIX2(fi['whip'])}")
+    return out
+
+
+def pick_line(pick, games):
+    """The pick's stat line from a final box score, found by game_id (if given), team and name; else None."""
+    for g in games:
+        if g["status"] != "final" or not g.get("results") or (pick.get("game_id") is not None and g["game_id"] != pick["game_id"]):
+            continue
+        side = "away" if g["away_team"] == pick["team"] else "home" if g["home_team"] == pick["team"] else None
+        if not side:
+            continue
+        ids = [r["id"] for r in g["lineups"][side] if r["name"] == pick["name"]]
+        hits = [b for b in g["results"]["batters"][side] if ids and b["id"] == ids[0]]
+        if hits:
+            return hits[0]["line"]
+    return None
+
+
 # =====================================================================
 def test_real(browser, base):
     page_json = json.load(open(os.path.join(SITE, "data", "page.json"), encoding="utf-8"))
@@ -146,7 +208,7 @@ def test_real(browser, base):
     check("a11y: skip link is the first focusable element and becomes visible", pg.evaluate("document.activeElement.className") == "skip" and pg.evaluate("document.activeElement.getBoundingClientRect().left >= 0"))
     pg.evaluate("document.activeElement.blur()")
     check("a11y: exactly one h1", pg.locator("h1").count() == 1)
-    check("real: no console messages or page errors (includes CSP violations)", not page_msgs(log) and not log["errors"], (log["console"], log["errors"]))
+    check("real: no console messages or page errors (includes CSP violations)", not log["console"] and not log["errors"], (log["console"], log["errors"]))
     origin = base.rstrip("/")
     check("real: every request is same-origin", all(u.startswith(origin) for u in log["requests"]), [u for u in log["requests"] if not u.startswith(origin)])
     check("real: every response has the CSP header", all("content-security-policy" in h for _, _, h in log["responses"]))
@@ -178,40 +240,40 @@ def test_real(browser, base):
     check("board: top line (park, indoors, game date with no timezone shift)", tc(pg, ".bd-where") == ["Tropicana Field, indoors. Wednesday, October 28, 2026."], tc(pg, ".bd-where"))
     check("board: no live line on a final game", pg.locator(".bd-live").count() == 0)
     heads = tc(pg, ".bd thead th")
-    check("board: column headers", heads == ["Team", "Win chance", "Ahead after 5", "Starter strikeouts", "Final"], heads)
+    check("board: column headers", heads == ["Team", "Odds to win", "First 5 winner", "Total runs O/U", "Final"], heads)
     check("board: Final header in the separated last column", classes(pg, ".bd thead th")[-1] == "last")
     check("board: caption, column and row headers", pg.locator(".bd caption").count() == 1 and pg.locator(".bd th[scope=col]").count() == 5 and pg.locator(".bd th[scope=row]").count() == 2)
     teams = [tc(pg, ".bd th.team .nick"), tc(pg, ".bd th.team .pitch")]
     check("board: team cells (nickname + starter's last name)", teams == [["Brewers", "Rays"], ["Misiorowski pitching", "Rasmussen pitching"]], teams)
+    ou_labels, ou_vals = OU(m["total_over"])
+    check("board O/U: WS5 picks the 6.5 line (over chance 0.546, closest to 50%)", ou_labels == ["Over 6.5", "Under 6.5"] and ou_vals == ["55%", "45%"], (ou_labels, ou_vals))
+    check("board O/U: over label on the away row, under on the home row", tc(pg, ".bd .ou-l") == ou_labels, tc(pg, ".bd .ou-l"))
+    check("board O/U: labels are 13px #C9D6CE", css(pg, ".bd .ou-l", "fontSize") == "13px" and css(pg, ".bd .ou-l", "color") == "rgb(201, 214, 206)")
     for i, side in enumerate(("away", "home")):
         row = pg.locator(".bd tbody tr").nth(i)
         plates = [x.strip() for x in row.locator(".plate").all_text_contents()]
-        st = g["starters"][side]
-        exp = [PCT(m[side + "_win"]), PCT(m["f5_" + side]), RUNS(st["median_k"]).split()[0], str(g[side + "_score"])]
+        exp = [PCT(m[side + "_win"]), PCT(m["f5_" + side]), ou_vals[i], str(g[side + "_score"])]
         check(f"board {side}: plate numbers", plates == exp, (plates, exp))
         cls = row.locator(".plate").evaluate_all("els => els.map(e => e.className)")
         expc = [f"plate {BT(m[side+'_win'], 'ml')}", f"plate {BT(m['f5_'+side], 'f5')}", "plate b-plain", "plate b-plain"]
-        check(f"board {side}: plate tier classes", cls == expc, (cls, expc))
-        f5cap = [norm(x) for x in row.locator("td[data-label='Ahead after 5'] .cap").all_text_contents()]
+        check(f"board {side}: plate tier classes (totals have no tier)", cls == expc, (cls, expc))
+        f5cap = [norm(x) for x in row.locator("td[data-label='First 5 winner'] .cap").all_text_contents()]
         check(f"board {side}: 'led after 5' only under the team that led", f5cap == (["led after 5"] if res["led_after_5"] == side else []), f5cap)
-        kcap = [norm(x) for x in row.locator("td[data-label='Starter strikeouts'] .cap").all_text_contents()]
-        check(f"board {side}: strikeout caption with the actual count", kcap == [f"median, threw {res['starter_k'][side]}"], kcap)
-    check("board: the % sign is its own smaller span", pg.locator(".bd .plate .pc").count() == 4)
+    check("board O/U: the pair adds to 100", sum(int(v.rstrip("%")) for v in ou_vals) == 100)
+    check("board: no strikeout column, no strikeout captions", pg.locator(".bd td[data-label='Starter strikeouts']").count() == 0 and not any("median" in c for c in tc(pg, ".bd .cap")))
+    check("board: the % sign is its own smaller span", pg.locator(".bd .plate .pc").count() == 6)
 
-    # lamp row (WS5: no run in the 1st -> lit; Brewers led after 5 -> tied lamp unlit; median total has no lamp)
+    # lamp row: NRFI only (WS5: no run in the 1st -> lit)
     nr_lit = res["run_in_first"] is False
-    tie_lit = res["led_after_5"] not in ("away", "home")
-    check("lamps: no-run text and tier", tc(pg, ".lr-nr") == [f"No run in the 1st: {PCT(m['no_run_first'])}" + (" It happened." if nr_lit else "")] and classes(pg, ".lr-nr .num") == [f"num {BT(m['no_run_first'], 'nrfi')}"], (tc(pg, ".lr-nr"), classes(pg, ".lr-nr .num")))
-    check("lamps: lamp-row values are bold numerals, no plates", pg.locator(".lamprow .mini, .lamprow .plate").count() == 0 and pg.locator(".lamprow b.num").count() == 3)
-    check("lamps: no-run lamp is lit", pg.locator(".lr-nr .lamp.on").count() == 1 and nr_lit)
-    check("lamps: tied-after-5 text", tc(pg, ".lr-tie") == [f"Tied after 5: {PCT(m['f5_tie'])}" + (" It happened." if tie_lit else "")], tc(pg, ".lr-tie"))
-    check("lamps: tied-after-5 lamp is present and unlit", pg.locator(".lr-tie .lamp").count() == 1 and pg.locator(".lr-tie .lamp.on").count() == 0 and not tie_lit)
-    check("lamps: median total, no lamp", tc(pg, ".lr-tot") == [f"Median total {RUNS(m['median_total'])}; {res['total_runs']} scored"] and pg.locator(".lr-tot .lamp").count() == 0, tc(pg, ".lr-tot"))
-    check("lamps: legend", tc(pg, ".lr-note") == ["A lit lamp means it happened."])
+    check("lamps: NRFI is the only item, with its tier", tc(pg, ".lamprow") == [f"NRFI {PCT(m['no_run_first'])}" + (" It happened." if nr_lit else "")] and classes(pg, ".lamprow .num") == [f"num {BT(m['no_run_first'], 'nrfi')}"], (tc(pg, ".lamprow"), classes(pg, ".lamprow .num")))
+    check("lamps: NRFI lamp is lit", pg.locator(".lr-nr .lamp.on").count() == 1 and pg.locator(".lamprow .lamp").count() == 1 and nr_lit)
+    check("lamps: no tied, median total or visible note", pg.locator(".lr-tie, .lr-tot, .lr-note").count() == 0 and "A lit lamp" not in pg.evaluate("document.body.innerText"))
+    check("lamps: values are bold numerals, no plates", pg.locator(".lamprow .mini, .lamprow .plate").count() == 0 and pg.locator(".lamprow b.num").count() == 1)
     check("lamps: hidden from screen readers", all(a == "true" for a in pg.eval_on_selector_all(".lamp", "els => els.map(e => e.getAttribute('aria-hidden'))")))
 
-    # ---------- conditions (dome) ----------
-    check("conditions: dome message", tc(pg, ".cond-note") == ["Dome. The model treats Tropicana Field as indoors, so weather is not a factor."], tc(pg, ".cond-note"))
+    # ---------- home run conditions (dome) ----------
+    check("conditions: heading, no park line", tc(pg, ".cond h2") == ["Home run conditions"] and pg.locator(".cond .subl").count() == 0)
+    check("conditions: dome is one line", tc(pg, ".cond-note") == ["Dome"], tc(pg, ".cond-note"))
     check("conditions: no outdoor readings for a dome", pg.locator(".wx").count() == 0)
     check("conditions: HR box text", tc(pg, ".hrbox .hrrow > span") == [f"Home run conditions: {g['weather']['hr_label']}", f"{g['weather']['hr_score']} out of 100"], tc(pg, ".hrbox .hrrow > span"))
     check("conditions: bar width = score (CSSOM style works under the CSP), not hot at 50", pg.evaluate("Math.abs(document.querySelector('.hrbox .fill').getBoundingClientRect().width - document.querySelector('.hrbox .track').getBoundingClientRect().width * 0.5) < 1") and pg.evaluate("document.querySelector('.hrbox .fill').style.width") == "50%" and pg.locator(".fill.hot").count() == 0)
@@ -230,6 +292,7 @@ def test_real(browser, base):
     check("totals: no check marks (5 runs went over none of the lines)", pg.locator(".tot svg").count() == over == 0)
 
     # ---------- pitchers ----------
+    check("pitchers: sub line", tc(pg, ".pitchers .subl") == ["Chance each starter reaches a strikeout total."], tc(pg, ".pitchers .subl"))
     pits = pg.locator(".pit")
     check("pitchers: two blocks", pits.count() == 2)
     for i, side in enumerate(("away", "home")):
@@ -247,18 +310,19 @@ def test_real(browser, base):
         marks = [blk.locator(".rung").nth(j).locator("svg").count() == 1 for j in range(len(ks))]
         check(f"pitchers {side}: check under each total reached", marks == [threw >= int(k) for k in ks], marks)
         check(f"pitchers {side}: check marks carry words", t(".rung .ck") == [("reached" if threw >= int(k) else "") for k in ks], t(".rung .ck"))
-        fi = p["first_inning"]
-        exp_fi = (f"First inning over {fi['starts']} starts: {Decimal(str(fi['era'])).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)} ERA, "
-                  f"scoreless {fi['scoreless']} times, {str(Decimal(str(fi['opp_obp'])).quantize(Decimal('0.001'), rounding=ROUND_HALF_UP))[1:]} opponent OBP.")
-        check(f"pitchers {side}: first-inning line", t(".first") == [exp_fi], (t(".first"), exp_fi))
+        exp_fi = fi_expect(p["first_inning"])
+        check(f"pitchers {side}: first-inning label and stat blocks (no WHIP in the data)", t(".fi-l") == ["First inning"] and t(".stats > div") == exp_fi and len(exp_fi) == 3, (t(".stats > div"), exp_fi))
+    check("pitchers: first-inning sentence is gone", pg.locator(".pit .first").count() == 0 and "First inning over" not in pg.evaluate("document.body.innerText"))
     check("pitchers: Rasmussen's 3+ and 4+ checked, nothing for Misiorowski", pits.nth(0).locator("svg").count() == 0 and pits.nth(1).locator("svg").count() == 2)
 
     # ---------- lineups: every cell, every chip class, every check ----------
+    check("lineups: sub line without the check sentence", tc(pg, ".lineups .subl") == ["Chance of at least one hit, two total bases, a homer, an RBI and a steal."], tc(pg, ".lineups .subl"))
     by_id = {r["id"]: r for side in ("away", "home") for r in res["batters"][side]}
     tabs = pg.locator("table.t")
     check("lineups: two tables with a Result column", tabs.count() == 2 and tabs.nth(0).locator("thead th").count() == 8)
     check("lineups: column headers", tc(pg, "table.t >> nth=0 >> thead th") == ["#", "Player", "1+ hit", "2+ bases", "Homer", "RBI", "Steal", "Result"], tc(pg, "table.t >> nth=0 >> thead th"))
-    check("lineups: headings use nicknames", tc(pg, ".lu h3") == ["Brewers batting order", "Rays batting order"], tc(pg, ".lu h3"))
+    check("lineups: headings are just the nicknames", tc(pg, ".lu h3") == ["Brewers", "Rays"], tc(pg, ".lu h3"))
+    check("lineups: tables keep accessible captions", tc(pg, "table.t caption") == ["Milwaukee Brewers batting order", "Tampa Bay Rays batting order"], tc(pg, "table.t caption"))
     exp_checks = {}
     for i, side in enumerate(("away", "home")):
         rows = tabs.nth(i).locator("tbody tr")
@@ -282,33 +346,39 @@ def test_real(browser, base):
     check("lineups: rows at least 44px tall", pg.evaluate("[...document.querySelectorAll('table.t tbody tr')].every(r => r.getBoundingClientRect().height >= 44)"))
 
     # ---------- Beat the Streak ----------
-    name_to_id = {r["name"]: r["id"] for side in ("away", "home") for r in g["lineups"][side]}
     picks = page_json["beat_the_streak"]
-    exp_meta = [f"{NICK[p['team']]} {'vs' if p['home'] else 'at'} {NICK[p['opponent']]}. " + ("Got a hit." if by_id[name_to_id[p["name"]]]["h"] >= 1 else "No hit.") for p in picks]
+    exp_lines = [pick_line(p, page_json["games"]) for p in picks]
+    check("BTS: every WS5 pick has a stat line", all(exp_lines), exp_lines)
     check("BTS: ranks", tc(pg, ".bts .rk") == ["1", "2", "3", "4", "5"], tc(pg, ".bts .rk"))
     check("BTS: names", tc(pg, ".bts .name") == [p["name"] for p in picks])
-    check("BTS: matchup and result lines from the box score", tc(pg, ".bts .meta") == exp_meta, (tc(pg, ".bts .meta"), exp_meta))
+    check("BTS: team nickname then the night's stat line", tc(pg, ".bts .meta") == [NICK[p["team"]] + l for p, l in zip(picks, exp_lines)], tc(pg, ".bts .meta"))
+    check("BTS: stat lines from the box score", tc(pg, ".bts .line") == exp_lines, (tc(pg, ".bts .line"), exp_lines))
+    check("BTS: no matchup or hit words", not any(w in " ".join(tc(pg, ".bts")) for w in (" at ", " vs ", "Got a hit", "No hit")))
+    check("BTS: team 14px muted, line 14px ink semibold after a 10px gap",
+          [css(pg, ".bts .meta", "fontSize"), css(pg, ".bts .meta", "color"), css(pg, ".bts .line", "fontSize"), css(pg, ".bts .line", "color"), css(pg, ".bts .line", "fontWeight"), css(pg, ".bts .line", "marginLeft")]
+          == ["14px", "rgb(78, 95, 86)", "14px", "rgb(19, 36, 28)", "600", "10px"])
     check("BTS: hit chances", tc(pg, ".bts .p") == [PCT(p["hit"]) for p in picks], tc(pg, ".bts .p"))
     check("BTS: chip classes", classes(pg, ".bts .p") == [f"p {TIER(p['hit'], 'hit')}" for p in picks], classes(pg, ".bts .p"))
     check("BTS: section is the #bts anchor", pg.locator("section#bts h2").count() == 1)
 
-    # ---------- reading guide ----------
-    legend = [tc(pg, ".legend .p"), tc(pg, ".legend li > span:last-child")]
-    check("guide: legend always visible", legend == [["74%", "65%", "33%"], ["Strong. It clears the cut-off for that market.", "Worth watching.", "Below the watch line."]] and pg.is_visible(".legend"), legend)
-    check("guide: legend chips use the table tiers", classes(pg, ".legend .p") == ["p p-strong", "p p-watch", "p p-low"])
+    # ---------- cut-offs ----------
+    check("cut-offs: no reading-guide heading, sentence or legend", pg.locator(".guide, .legend").count() == 0 and "How to read the numbers" not in pg.evaluate("document.body.innerText"))
+    check("cut-offs: its own disclosure right under Beat the Streak", pg.evaluate("document.querySelector('#bts').nextElementSibling.matches('details.how')"))
+    check("cut-offs: 3px board-green top rule", css(pg, ".how", "borderTopWidth") == "3px" and css(pg, ".how", "borderTopColor") == GREEN)
     ind = "() => { const s = document.querySelector('.how summary'), b = getComputedStyle(s, '::before'); return [b.content, b.borderLeftWidth, b.transform, s.getBoundingClientRect().height >= 44]; }"
     closed = pg.evaluate(ind)
-    check("guide: summary shows an open indicator, 44px tall", closed[0] == '""' and closed[1] == "8px" and closed[2] == "none" and closed[3], closed)
+    check("cut-offs: summary shows an open indicator, 44px tall", closed[0] == '""' and closed[1] == "8px" and closed[2] == "none" and closed[3], closed)
     pg.click(".how summary")
     opened = pg.evaluate(ind)
-    check("guide: indicator turns when open", opened[2] != "none" and opened[3], opened)
+    check("cut-offs: indicator turns when open", opened[2] != "none" and opened[3], opened)
+    check("cut-offs: key line comes first, before the table", tc(pg, ".how p.key") == [KEY_LINE] and pg.evaluate("document.querySelector('.how p.key').nextElementSibling.tagName") == "TABLE")
     rows = tc(pg, ".how tbody tr")
-    exp = {"Win chance": "ml", "Ahead after 5 innings": "f5", "No run in the 1st": "nrfi", "Starter 3+ strikeouts": "k3",
+    exp = {"Odds to win": "ml", "First 5 winner": "f5", "No run in the 1st": "nrfi", "Starter 3+ strikeouts": "k3",
            "Starter 4+ strikeouts": "k4", "Starter 5+ strikeouts": "k5", "Starter 6+ strikeouts": "k6", "Starter 7+ strikeouts": "k7",
            "Batter 1+ hit": "hit", "Batter 2+ total bases": "tb", "Batter 1+ home run": "hr", "Batter 1+ RBI": "rbi", "Batter 1+ stolen base": "sb"}
-    check("guide: thresholds table equals the original app's cut-offs", rows == [f"{k}{TH[v][0]}%+{TH[v][1]}%+" for k, v in exp.items()], rows)
+    check("cut-offs: table equals the original app's cut-offs, rows named as on the board", rows == [f"{k}{TH[v][0]}%+{TH[v][1]}%+" for k, v in exp.items()], rows)
     guide_txt = norm(" ".join(tc(pg, ".how")))
-    check("guide: HR tiers as in the original colour guide", all(s in guide_txt for s in ["65 and up Very HR Friendly", "55 to 64 HR Friendly", "45 to 54 Neutral", "35 to 44 HR Suppressed", "under 35 Very HR Suppressed", "One point is about one foot"]), guide_txt)
+    check("cut-offs: HR tiers as in the original colour guide", all(s in guide_txt for s in ["65 and up Very HR Friendly", "55 to 64 HR Friendly", "45 to 54 Neutral", "35 to 44 HR Suppressed", "under 35 Very HR Suppressed", "One point is about one foot"]), guide_txt)
 
     # ---------- structure, accessibility, copy ----------
     check("a11y: html lang and viewport", pg.evaluate("document.documentElement.lang") == "en" and pg.locator("meta[name=viewport]").count() == 1)
@@ -340,11 +410,11 @@ def test_real(browser, base):
     pg.evaluate("document.fonts.ready")
     pg.wait_for_timeout(300)
     check("phone 390: no horizontal page scroll", no_hscroll(pg), pg.evaluate("document.documentElement.scrollWidth"))
-    check("phone 390: no console messages", not page_msgs(log) and not log["errors"], log["console"])
+    check("phone 390: no console messages", not log["console"] and not log["errors"], log["console"])
     wide = pg.evaluate("[...document.querySelectorAll('.scroll')].map(e => e.scrollWidth > e.clientWidth)")
     check("phone 390: lineup tables scroll inside their own box", wide == [True, True], wide)
     labels = pg.evaluate("[...document.querySelectorAll('.bd tbody tr:first-child td')].map(td => getComputedStyle(td, '::before').content)")
-    check("phone 390: board cells labelled from data-label", labels == ['"Win chance"', '"Ahead after 5"', '"Starter strikeouts"', '"Final"'], labels)
+    check("phone 390: board cells labelled from data-label", labels == ['"Odds to win"', '"First 5 winner"', '"Total runs O/U"', '"Final"'], labels)
     sizes = pg.evaluate("(() => { const p = document.querySelector('.plate'); return [parseFloat(getComputedStyle(p).fontSize), parseFloat(getComputedStyle(p.querySelector('.pc')).fontSize), parseFloat(getComputedStyle(document.querySelector('h1')).fontSize)]; })()")
     check("phone 390: plates 36-40px with an 18-20px % sign, h1 about 48px", 36 <= sizes[0] <= 40 and 18 <= sizes[1] <= 20 and sizes[2] == 48, sizes)
     check("phone 390: each team is one block (name row on top, plates below)", pg.evaluate("[...document.querySelectorAll('.bd tbody tr')].every(tr => { const th = tr.querySelector('th').getBoundingClientRect(); return [...tr.querySelectorAll('td')].every(td => td.getBoundingClientRect().top >= th.bottom); })"))
@@ -396,11 +466,17 @@ def season_data():
     g1["markets"].update({"median_total": 8.5})
     g2 = mk(1002, "Athletics", "Seattle Mariners", "live", park="T-Mobile Park", roof="dome", weather=None,
             start_time_utc="2026-04-14T20:10:00Z", away_score=2, home_score=3, inning=5, inning_half="bottom", outs=2, results=None)
-    g2["markets"].update({"away_win": 0.4123, "home_win": 0.5877, "f5_away": 0.3041, "f5_home": 0.5512, "f5_tie": 0.1447, "no_run_first": 0.6233})
+    # 7.5 and 8.5 are equally far from 50% (0.55 and 0.45): the higher line wins
+    g2["markets"].update({"away_win": 0.4123, "home_win": 0.5877, "f5_away": 0.3041, "f5_home": 0.5512, "f5_tie": 0.1447, "no_run_first": 0.6233,
+                          "total_over": {"6.5": 0.66, "7.0": 0.6, "7.5": 0.55, "8.5": 0.45, "9.5": 0.31}})
     g2["starters"]["away"] = None
     g2["starters"]["home"]["first_inning"] = None
-    g3 = mk(1003, "New York Yankees", "Boston Red Sox", "final", park="Fenway Park", roof="open", weather=outdoor,
+    # final, open air, with the file's own dew point and elevation (they win over the computed ones)
+    g3 = mk(1003, "New York Yankees", "Boston Red Sox", "final", park="Fenway Park", roof="open",
+            weather=dict(outdoor, dew_point_f=50.6, elevation_ft=5204),
             start_time_utc="2026-04-14T17:05:00Z", away_score=6, home_score=5)
+    g3["markets"]["total_over"] = {"6.5": 0.7, "7.5": 0.6, "8.5": 0.52, "9.5": 0.47, "10.5": 0.35, "11.5": 0.25}
+    g3["starters"]["away"]["first_inning"]["whip"] = 1.2345
     g3["results"]["total_runs"] = 11
     g3["results"]["run_in_first"] = True
     g3["results"]["led_after_5"] = "home"
@@ -418,6 +494,15 @@ def season_data():
 
 def board_plates(pg):
     return [[x.strip() for x in pg.locator(".bd tbody tr").nth(i).locator(".plate").all_text_contents()] for i in range(2)]
+
+
+def readings(w, home_code):
+    """The six open-air readings as textContent: label, value, and the wind note."""
+    dew = int(HU(Decimal(str(w["dew_point_f"])))) if w.get("dew_point_f") is not None else DEW(w["temp_f"], w["humidity_pct"])
+    elev = int(HU(Decimal(str(w["elevation_ft"])))) if w.get("elevation_ft") is not None else FT(ELEV_M[home_code])
+    return [f"Temperature{int(HU(Decimal(str(w['temp_f']))))}°F", f"Humidity{w['humidity_pct']}%", f"Dew point{dew}°F",
+            f"Wind{int(HU(Decimal(str(w['wind_mph']))))} mph from {w['wind_from']}{w['wind_label']}", f"Elevation{elev:,} ft",
+            f"Carry+{int(HU(Decimal(str(w['carry_ft']))))} ft"]
 
 
 def test_season(browser):
@@ -457,51 +542,63 @@ def test_season(browser):
         mini_cls = classes(pg, ".gm .mini")
         check("season: button win chances carry the board tier", mini_cls == [f"mini {BT(g['markets'][k], 'ml')}" for g in (g1, g2, g3) for k in ("away_win", "home_win")], mini_cls)
 
-        # BTS: scheduled and live games have no result; a pick with game_id finds the right game; unknown name shows nothing
+        # BTS: team nickname; a stat line only where a final box score has the player (game_id picks the game)
+        exp_lines = [pick_line(p, d["games"]) for p in d["beat_the_streak"]]
+        check("season BTS: lines only for picks in the final game", [l is not None for l in exp_lines] == [False, True, True, True, False], exp_lines)
         meta = tc(pg, ".bts .meta")
-        check("season BTS: result only where a final box score has the player", [("Got a hit" in x, "No hit" in x) for x in meta] == [(False, False), (True, False), (False, True), (True, False), (False, False)], meta)
-        check("season BTS: matchup lines use nicknames", meta[0] == "Yankees at Red Sox." and meta[2] == "Red Sox vs Yankees. No hit." and meta[4] == "Mariners vs Athletics.", meta)
+        check("season BTS: team nickname alone before results, plus the stat line after", meta == [NICK[p["team"]] + (l or "") for p, l in zip(d["beat_the_streak"], exp_lines)], meta)
+        check("season BTS: stat lines", tc(pg, ".bts .line") == [l for l in exp_lines if l], tc(pg, ".bts .line"))
         check("season BTS: tiny probability shows <1%, near-certain >99%", tc(pg, ".bts .p")[4] == "<1%" and tc(pg, ".bts .p")[0] == ">99%", tc(pg, ".bts .p"))
 
-        # game 1: scheduled, outdoor weather
+        # game 1: scheduled, outdoor weather (dew point and elevation computed)
         check("season game 1: top line gives first pitch", tc(pg, ".bd-where") == ["Fenway Park. First pitch 7:10 PM EDT."], tc(pg, ".bd-where"))
         check("season game 1: no last column, no live line", pg.locator(".bd th[scope=col]").count() == 4 and pg.locator(".bd .last").count() == 0 and pg.locator(".bd-live").count() == 0)
-        check("season game 1: board numbers", board_plates(pg) == [[PCT(g1["markets"]["away_win"]), PCT(g1["markets"]["f5_away"]), "6"], [PCT(g1["markets"]["home_win"]), PCT(g1["markets"]["f5_home"]), "6"]], board_plates(pg))
-        check("season game 1: captions say median only, nobody led after 5", tc(pg, ".bd .cap") == ["median", "median"], tc(pg, ".bd .cap"))
-        check("season game 1: lamp row without lamps or legend", pg.locator(".lamprow .lamp").count() == 0 and pg.locator(".lr-note").count() == 0)
-        check("season game 1: median total not whole shows one decimal, nothing scored yet", tc(pg, ".lr-tot") == [f"Median total {RUNS(g1['markets']['median_total'])}"], tc(pg, ".lr-tot"))
+        l1, v1 = OU(g1["markets"]["total_over"])
+        check("season game 1: board numbers", board_plates(pg) == [[PCT(g1["markets"]["away_win"]), PCT(g1["markets"]["f5_away"]), v1[0]], [PCT(g1["markets"]["home_win"]), PCT(g1["markets"]["f5_home"]), v1[1]]], board_plates(pg))
+        check("season game 1: O/U labels", tc(pg, ".bd .ou-l") == l1, tc(pg, ".bd .ou-l"))
+        check("season game 1: nobody led after 5 yet", tc(pg, ".bd .cap") == [], tc(pg, ".bd .cap"))
+        check("season game 1: NRFI without a lamp before the game", tc(pg, ".lamprow") == [f"NRFI {PCT(g1['markets']['no_run_first'])}"] and pg.locator(".lamprow .lamp").count() == 0, tc(pg, ".lamprow"))
+        check("season game 1: dew point by Magnus is 47°F", DEW(61.4, 58) == 47)
+        check("season game 1: Fenway's 6 m is 20 ft", FT(ELEV_M["BOS"]) == 20)
         wx = tc(pg, ".wx > div")
-        check("season game 1: six weather readings", wx == ["Temperature61°F", "Humidity58%", "Pressure30.11 inHg", "Wind12 mph from SW", "Toward center fieldOut to CF (7 mph)", "Carry change+6 ft"], wx)
+        check("season game 1: six readings, computed dew point and elevation", wx == readings(g1["weather"], "BOS"), (wx, readings(g1["weather"], "BOS")))
+        check("season game 1: no pressure, wind note 13px muted under the wind", "Pressure" not in " ".join(wx) and tc(pg, ".wx .note") == ["Out to CF (7 mph)"] and css(pg, ".wx .note", "fontSize") == "13px" and css(pg, ".wx .note", "color") == "rgb(78, 95, 86)")
         check("season game 1: HR box and hot bar", tc(pg, ".hrbox .hrrow > span") == ["Home run conditions: HR Friendly", "63 out of 100"] and pg.locator(".fill.hot").count() == 1, tc(pg, ".hrbox .hrrow > span"))
         check("season game 1: totals sub line without a result", tc(pg, ".totals .subl") == ["Chance the game goes over each line."])
         check("season game 1: lineup table has no Result column and no checks", pg.locator("table.t").first.locator("thead th").count() == 7 and pg.locator("table.t svg").count() == 0)
         g1_plates = board_plates(pg)
 
-        # game 2: live, dome, missing weather, missing starter, missing first-inning record
+        # game 2: live, dome, missing weather, missing starter, missing first-inning record, O/U tie
         pg.click(".gm >> nth=1")
         check("season game 2: selection moves", [pg.get_attribute(f".gm >> nth={i}", "aria-pressed") for i in range(3)] == ["false", "true", "false"])
         check("season game 2: focus stays on the button that was clicked", pg.evaluate("document.activeElement.getAttribute('data-id')") == "1002")
-        check("season game 2: board numbers changed to game 2", board_plates(pg) != g1_plates and board_plates(pg) == [[PCT(0.4123), PCT(0.3041), "–", "2"], [PCT(0.5877), PCT(0.5512), "6", "3"]], board_plates(pg))
-        check("season game 2: plate tiers follow the new numbers", classes(pg, ".bd tbody tr >> nth=1 >> .plate")[:2] == [f"plate {BT(0.5877, 'ml')}", f"plate {BT(0.5512, 'f5')}"], classes(pg, ".bd tbody tr >> nth=1 >> .plate"))
+        l2, v2 = OU(g2["markets"]["total_over"])
+        check("season game 2: O/U tie goes to the higher line (8.5, over 45, under 55)", l2 == ["Over 8.5", "Under 8.5"] and v2 == ["45%", "55%"] and tc(pg, ".bd .ou-l") == l2, (l2, v2, tc(pg, ".bd .ou-l")))
+        check("season game 2: board numbers changed to game 2", board_plates(pg) != g1_plates and board_plates(pg) == [[PCT(0.4123), PCT(0.3041), v2[0], "2"], [PCT(0.5877), PCT(0.5512), v2[1], "3"]], board_plates(pg))
+        check("season game 2: plate tiers follow the new numbers", classes(pg, ".bd tbody tr >> nth=1 >> .plate")[:3] == [f"plate {BT(0.5877, 'ml')}", f"plate {BT(0.5512, 'f5')}", "plate b-plain"], classes(pg, ".bd tbody tr >> nth=1 >> .plate"))
         check("season game 2: live line with a lit lamp", tc(pg, ".bd-live") == ["Live, bottom 5th, 2 outs"] and pg.locator(".bd-live .lamp.on").count() == 1, tc(pg, ".bd-live"))
         check("season game 2: top line gives the date for a live game", tc(pg, ".bd-where") == ["T-Mobile Park, indoors. Tuesday, April 14, 2026."], tc(pg, ".bd-where"))
         check("season game 2: last column is Runs", tc(pg, ".bd thead th.last") == ["Runs"])
         teams = [tc(pg, ".bd th.team .nick"), tc(pg, ".bd th.team .pitch")]
         check("season game 2: starter not announced on the board", teams == [["Athletics", "Mariners"], ["Starter not announced", "Rasmussen pitching"]], teams)
         check("season game 2: no 'led after 5' and no lamps while live", "led after 5" not in tc(pg, ".bd .cap") and pg.locator(".lamprow .lamp").count() == 0)
-        check("season game 2: forecast missing message", tc(pg, ".cond-note") == ["The forecast for this park was not available when the prediction ran."], tc(pg, ".cond-note"))
+        check("season game 2: forecast missing message under the new heading", tc(pg, ".cond h2") == ["Home run conditions"] and tc(pg, ".cond-note") == ["The forecast for this park was not available when the prediction ran."], tc(pg, ".cond-note"))
         pits = tc(pg, ".pit")
-        check("season game 2: starter not announced + first-inning fallback", "Starter not announced" in pits[0] and "First-inning record not shown (fewer than 5 starts)." in pits[1], pits)
+        check("season game 2: starter not announced + first-inning fallback", "Starter not announced" in pits[0] and tc(pg, ".fi-none") == ["First-inning record not shown (fewer than 5 starts)."] and pg.locator(".stats").count() == 0, pits)
 
-        # game 3: final, a run in the 1st, Red Sox led after 5, over lines exceeded
+        # game 3: final, a run in the 1st, Red Sox led after 5, over lines exceeded, file dew point and elevation, WHIP
         pg.click(".gm >> nth=2")
         r3 = g3["results"]
-        caps = [[norm(x) for x in pg.locator(".bd tbody tr").nth(i).locator("td[data-label='Ahead after 5'] .cap").all_text_contents()] for i in range(2)]
+        caps = [[norm(x) for x in pg.locator(".bd tbody tr").nth(i).locator("td[data-label='First 5 winner'] .cap").all_text_contents()] for i in range(2)]
         check("season game 3: 'led after 5' under the Red Sox plate only", caps == [[], ["led after 5"]], caps)
+        l3, v3 = OU(g3["markets"]["total_over"])
+        check("season game 3: O/U line 8.5 (0.52), over 52 and under 48", l3 == ["Over 8.5", "Under 8.5"] and v3 == ["52%", "48%"] and tc(pg, ".bd .ou-l") == l3 and [p[2] for p in board_plates(pg)] == v3, (l3, v3, board_plates(pg)))
         check("season game 3: final score plates", [p[-1] for p in board_plates(pg)] == ["6", "5"] and tc(pg, ".bd thead th.last") == ["Final"])
-        check("season game 3: no-run lamp unlit (a run scored in the 1st)", pg.locator(".lr-nr .lamp").count() == 1 and pg.locator(".lr-nr .lamp.on").count() == 0 and "It happened" not in tc(pg, ".lr-nr")[0])
-        check("season game 3: tied lamp unlit (Red Sox led)", pg.locator(".lr-tie .lamp").count() == 1 and pg.locator(".lr-tie .lamp.on").count() == 0)
-        check("season game 3: median total with runs scored", tc(pg, ".lr-tot") == [f"Median total {RUNS(g3['markets']['median_total'])}; {r3['total_runs']} scored"], tc(pg, ".lr-tot"))
+        check("season game 3: NRFI lamp unlit (a run scored in the 1st)", pg.locator(".lr-nr .lamp").count() == 1 and pg.locator(".lr-nr .lamp.on").count() == 0 and "It happened" not in tc(pg, ".lr-nr")[0])
+        wx3 = tc(pg, ".wx > div")
+        check("season game 3: the file's dew point and elevation win", wx3 == readings(g3["weather"], "BOS") and "Dew point51°F" in wx3 and "Elevation5,204 ft" in wx3, wx3)
+        st3 = [[norm(x) for x in pg.locator(".pit").nth(i).locator(".stats > div").all_text_contents()] for i in range(2)]
+        check("season game 3: WHIP shows when the data has it", st3 == [fi_expect(g3["starters"]["away"]["first_inning"]), fi_expect(g3["starters"]["home"]["first_inning"])] and st3[0][-1] == "WHIP1.23" and len(st3[1]) == 3, st3)
         lines = sorted((k for k in g3["markets"]["total_over"] if k.endswith(".5")), key=float)
         over = sum(r3["total_runs"] > float(k) for k in lines)
         check("season game 3: totals sub line counts the lines it went over", tc(pg, ".totals .subl") == [f"Chance the game goes over each line. It finished with {RUNS(r3['total_runs'])}, over {over} of them."], tc(pg, ".totals .subl"))
@@ -529,7 +626,7 @@ def test_season(browser):
         screenshot(pg, "season-live-390.png")
         ctx.close()
 
-        # tied after 5 lights the lamp; an unknown result shows no lamp at all
+        # a tie after 5 puts 'led after 5' under neither team; an unknown run_in_first shows no NRFI lamp
         d2 = season_data()
         d2["games"] = [d2["games"][2]]
         d2["games"][0]["results"]["led_after_5"] = "tie"
@@ -538,16 +635,16 @@ def test_season(browser):
         ctx = new_ctx(browser)
         pg, log = open_page(ctx, base, fixed="2026-04-14T14:00:00Z")
         pg.wait_for_selector(".lamprow")
-        check("lamps: a tie lights the tied lamp and says so", pg.locator(".lr-tie .lamp.on").count() == 1 and tc(pg, ".lr-tie")[0].endswith("It happened."), tc(pg, ".lr-tie"))
-        check("lamps: run_in_first not a boolean means no no-run lamp", pg.locator(".lr-nr .lamp").count() == 0)
-        check("lamps: a tie puts 'led after 5' under neither team", "led after 5" not in tc(pg, ".bd .cap"))
+        check("lamps: run_in_first not a boolean means no NRFI lamp", pg.locator(".lamprow .lamp").count() == 0 and tc(pg, ".lamprow") == [f"NRFI {PCT(d2['games'][0]['markets']['no_run_first'])}"])
+        check("board: a tie puts 'led after 5' under neither team, and the tie chance is not shown", "led after 5" not in tc(pg, ".bd .cap") and "Tied" not in pg.evaluate("document.querySelector('.board').innerText"))
         ctx.close()
-        d2["games"][0]["results"]["led_after_5"] = None
+        # no run in the 1st on a final game lights the lamp and says so
+        d2["games"][0]["results"]["run_in_first"] = False
         json.dump(d2, open(pj, "w", encoding="utf-8"), ensure_ascii=False)
         ctx = new_ctx(browser)
         pg, log = open_page(ctx, base, fixed="2026-04-14T14:00:00Z")
         pg.wait_for_selector(".lamprow")
-        check("lamps: led_after_5 null means no tied lamp and no lamp legend", pg.locator(".lamprow .lamp").count() == 0 and pg.locator(".lr-note").count() == 0)
+        check("lamps: no run in the 1st lights the NRFI lamp, with words for screen readers", pg.locator(".lr-nr .lamp.on").count() == 1 and tc(pg, ".lr-nr")[0].endswith("It happened."), tc(pg, ".lr-nr"))
         ctx.close()
     finally:
         srv.terminate()

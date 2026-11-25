@@ -38,6 +38,13 @@
     'Tampa Bay Rays': 'Rays', 'Texas Rangers': 'Rangers', 'Toronto Blue Jays': 'Blue Jays',
     'Washington Nationals': 'Nationals',
   };
+  // Park elevation in metres by home team code, copied from STADIUM_INFO (elevation_m) in the engine's weather.py.
+  // ATH is not in that table yet (it still maps the A's to the Coliseum as OAK), so an A's home game shows no elevation.
+  const ELEV_M = {
+    ARI: 331, ATL: 305, BAL: 13, BOS: 6, CHC: 182, CWS: 181, CIN: 148, CLE: 200, COL: 1581, DET: 183,
+    HOU: 14, KC: 268, LAA: 48, LAD: 142, MIA: 4, MIL: 181, MIN: 255, NYM: 4, NYY: 9, OAK: 6,
+    PHI: 9, PIT: 223, SD: 10, SF: 5, SEA: 6, STL: 136, TB: 13, TEX: 171, TOR: 78, WSH: 5,
+  };
   const code = (name) => TEAM_CODES[name] || String(name || '?').split(' ').pop().slice(0, 3).toUpperCase();
   const nick = (name) => NICK[name] || String(name || '?').split(' ').pop();
 
@@ -93,20 +100,15 @@
   const lamp = (on) => h('span', { class: 'lamp' + (on ? ' on' : ''), 'aria-hidden': 'true' });
 
   // ---------- number and date formatting ----------
+  const ok = (x) => typeof x === 'number' && Number.isFinite(x);
   // Whole percent, rounded half up on the decimal value (toPrecision drops binary float noise such as 28.499999999999996).
   const whole = (p) => Math.round(Number((p * 100).toPrecision(12)));
-
-  function pct(p) {
-    if (typeof p !== 'number' || !Number.isFinite(p)) return '–';
-    const r = whole(p);
-    if (r <= 0) return '<1%';
-    if (r >= 100) return '>99%';
-    return r + '%';
-  }
+  const wholePct = (r) => (r <= 0 ? '<1%' : r >= 100 ? '>99%' : r + '%');
+  const pct = (p) => (ok(p) ? wholePct(whole(p)) : '–');
 
   function tier(p, key) {
     const t = THRESH[key];
-    if (!t || typeof p !== 'number' || !Number.isFinite(p)) return 'p-low';
+    if (!t || !ok(p)) return 'p-low';
     const r = whole(p);
     if (r >= whole(t[0])) return 'p-strong';
     if (r >= whole(t[1])) return 'p-watch';
@@ -115,10 +117,11 @@
   const btier = (p, key) => tier(p, key).replace('p-', 'b-');
 
   const pcell = (p, key) => h('span', { class: 'p ' + tier(p, key) }, pct(p));
-  const num1 = (x) => (typeof x === 'number' ? x.toFixed(1) : '–');
+  const num1 = (x) => (ok(x) ? x.toFixed(1) : '–');
   const trim1 = (x) => num1(x).replace(/\.0$/, '');
-  const dot3 = (x) => (typeof x === 'number' ? x.toFixed(3).replace(/^0\./, '.') : '–');
-  const runs = (x) => (typeof x === 'number' ? trim1(x) + (x === 1 ? ' run' : ' runs') : '–');
+  const fix2 = (x) => (ok(x) ? x.toFixed(2) : '–');
+  const dot3 = (x) => (ok(x) ? x.toFixed(3).replace(/^0\./, '.') : '–');
+  const runs = (x) => (ok(x) ? trim1(x) + (x === 1 ? ' run' : ' runs') : '–');
 
   function ymd(s) {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || '');
@@ -207,10 +210,11 @@
   function finalTotal(g) {
     if (g.status !== 'final') return null;
     const res = g.results;
-    if (res && typeof res.total_runs === 'number') return res.total_runs;
-    return typeof g.away_score === 'number' && typeof g.home_score === 'number' ? g.away_score + g.home_score : null;
+    if (res && ok(res.total_runs)) return res.total_runs;
+    return ok(g.away_score) && ok(g.home_score) ? g.away_score + g.home_score : null;
   }
 
+  // The pick's box-score row once his game is final, or null.
   function pickResult(pick, games) {
     for (const g of games) {
       if (g.status !== 'final' || !g.results || !g.results.batters) continue;
@@ -220,9 +224,37 @@
       const row = ((g.lineups && g.lineups[side]) || []).find((r) => r.name === pick.name);
       if (!row) continue;
       const res = (g.results.batters[side] || []).find((r) => r.id === row.id);
-      if (res) return res.h >= 1;
+      if (res) return res;
     }
     return null;
+  }
+
+  // The total-runs line shown on the board: the .5 line whose over chance is closest to 50%; on a tie, the higher line.
+  function ouLine(over) {
+    let best = null;
+    for (const k of Object.keys(over || {})) {
+      const p = over[k];
+      if (!k.endsWith('.5') || !ok(p)) continue;
+      const d = Number(Math.abs(p - 0.5).toPrecision(12)); // so 0.45 and 0.55 count as the same distance
+      if (!best || d < best.d || (d === best.d && Number(k) > Number(best.k))) best = { k, d, over: whole(p) };
+    }
+    return best;
+  }
+
+  // Dew point in whole °F: the file's value, or Magnus from temperature and humidity (the engine's constants 6.1078, 7.5, 237.3).
+  function dewPointF(w) {
+    if (ok(w.dew_point_f)) return Math.round(w.dew_point_f);
+    if (!ok(w.temp_f) || !ok(w.humidity_pct) || w.humidity_pct <= 0) return null;
+    const t = (w.temp_f - 32) * 5 / 9;
+    const g = Math.log10(w.humidity_pct / 100) + (7.5 * t) / (t + 237.3);
+    return Math.round(((237.3 * g) / (7.5 - g)) * 9 / 5 + 32);
+  }
+
+  // Elevation in feet: the file's value, or the park table in metres converted and rounded to the nearest 10 ft.
+  function elevationFt(g, w) {
+    if (ok(w.elevation_ft)) return Math.round(w.elevation_ft);
+    const m = ELEV_M[code(g.home_team)];
+    return ok(m) ? Math.round((m * 3.28084) / 10) * 10 : null;
   }
 
   // ---------- the board ----------
@@ -234,7 +266,7 @@
       caption ? h('div', { class: 'cap' }, caption) : null);
   }
   const mini = (p, key) => h('span', { class: 'mini ' + (key ? btier(p, key) : 'b-plain') }, pct(p));
-  // Lamp-row values: bold numerals in the board tier colour, no plate (plates are for the board's main numbers).
+  // Lamp-row value: bold numerals in the board tier colour, no plate (plates are for the board's main numbers).
   const num = (text, cls) => h('b', { class: 'num ' + cls }, text);
 
   function board(g, date) {
@@ -249,46 +281,49 @@
     const when = fin || live ? (day ? day + '.' : null) : (first ? 'First pitch ' + first + '.' : null);
     const last = fin ? 'Final' : live ? 'Runs' : null;
     const led = res && (res.led_after_5 === 'away' || res.led_after_5 === 'home') ? res.led_after_5 : null;
+    const ou = ouLine(m.total_over);
+
+    // Sportsbook layout: the away row shows the over, the home row the under, for the same line; the pair adds to 100.
+    function ouCell(side) {
+      if (!ou) return plate('–', 'b-plain');
+      const over = side === 'away';
+      return h('div', { class: 'ou' },
+        h('div', { class: 'ou-l' }, (over ? 'Over ' : 'Under ') + ou.k),
+        plate(wholePct(over ? ou.over : 100 - ou.over), 'b-plain'));
+    }
 
     function row(side) {
       const team = g[side + '_team'];
       const st = g.starters && g.starters[side];
-      const threw = res && res.starter_k && typeof res.starter_k[side] === 'number' ? res.starter_k[side] : null;
       const score = g[side + '_score'];
       return h('tr', null,
         h('th', { scope: 'row', class: 'team' },
           h('span', { class: 'nick' }, nick(team)),
           h('span', { class: 'pitch' }, st && st.name ? lastName(st.name) + ' pitching' : 'Starter not announced')),
-        h('td', { 'data-label': 'Win chance' }, plate(pct(m[side + '_win']), btier(m[side + '_win'], 'ml'))),
-        h('td', { 'data-label': 'Ahead after 5' }, plate(pct(m['f5_' + side]), btier(m['f5_' + side], 'f5'), led === side ? 'led after 5' : null)),
-        h('td', { 'data-label': 'Starter strikeouts' }, st
-          ? plate(trim1(st.median_k), 'b-plain', threw === null ? 'median' : 'median, threw ' + threw)
-          : plate('–', 'b-plain')),
+        h('td', { 'data-label': 'Odds to win' }, plate(pct(m[side + '_win']), btier(m[side + '_win'], 'ml'))),
+        h('td', { 'data-label': 'First 5 winner' }, plate(pct(m['f5_' + side]), btier(m['f5_' + side], 'f5'), led === side ? 'led after 5' : null)),
+        h('td', { 'data-label': 'Total runs O/U' }, ouCell(side)),
         last ? h('td', { class: 'last', 'data-label': last }, plate(String(score ?? 0), 'b-plain')) : null);
     }
 
     const table = h('table', { class: 'bd' },
-      h('caption', { class: 'sr' }, g.away_team + ' at ' + g.home_team + ': win chance, ahead after 5, starter strikeouts'
+      h('caption', { class: 'sr' }, g.away_team + ' at ' + g.home_team + ': odds to win, first 5 winner, total runs over and under'
         + (last ? (fin ? ' and the final score' : ' and runs so far') : '')),
       h('thead', null, h('tr', null,
         h('th', { scope: 'col' }, h('span', { class: 'sr' }, 'Team')),
-        h('th', { scope: 'col' }, 'Win chance'),
-        h('th', { scope: 'col' }, 'Ahead after 5'),
-        h('th', { scope: 'col' }, 'Starter strikeouts'),
+        h('th', { scope: 'col' }, 'Odds to win'),
+        h('th', { scope: 'col' }, 'First 5 winner'),
+        h('th', { scope: 'col' }, 'Total runs O/U'),
         last ? h('th', { scope: 'col', class: 'last' }, last) : null)),
       h('tbody', null, row('away'), row('home')));
 
-    // Lamps only where the result is a known yes or no.
+    // The lamp shows only where the result is a known yes or no.
     const nrLit = res && typeof res.run_in_first === 'boolean' ? !res.run_in_first : null;
-    const tieLit = res && res.led_after_5 !== null && res.led_after_5 !== undefined ? !led : null;
-    const total = finalTotal(g);
-    const item = (lit, cls, ...kids) => h('li', { class: cls }, lit === null ? null : lamp(lit), kids, lit ? h('span', { class: 'sr' }, ' It happened.') : null);
     const lamps = h('div', { class: 'lamprow' },
-      h('ul', { class: 'lr' },
-        item(nrLit, 'lr-nr', 'No run in the 1st: ', num(pct(m.no_run_first), btier(m.no_run_first, 'nrfi'))),
-        item(tieLit, 'lr-tie', 'Tied after 5: ', num(pct(m.f5_tie), 'b-plain')),
-        item(null, 'lr-tot', 'Median total ', h('span', null, num(runs(m.median_total), 'b-plain'), total !== null ? '; ' + total + ' scored' : null))),
-      nrLit !== null || tieLit !== null ? h('p', { class: 'lr-note' }, 'A lit lamp means it happened.') : null);
+      h('p', { class: 'lr-nr' },
+        nrLit === null ? null : lamp(nrLit),
+        'NRFI ', num(pct(m.no_run_first), btier(m.no_run_first, 'nrfi')),
+        nrLit ? h('span', { class: 'sr' }, ' It happened.') : null));
 
     return h('section', { id: 'today', class: 'board', 'aria-labelledby': 'board-h' },
       h('h2', { id: 'board-h', class: 'sr' }, g.away_team + ' at ' + g.home_team),
@@ -319,32 +354,32 @@
   const section = (cls, title, sub, ...kids) => h('section', { class: 'sec' + (cls ? ' ' + cls : '') },
     h('h2', null, title), sub ? h('p', { class: 'subl' }, sub) : null, kids);
 
+  // A labelled reading: small label, value, and an optional note under it.
+  const stat = (k, v, note) => h('div', null, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v), note ? h('div', { class: 'note' }, note) : null);
+
   function conditions(g) {
     const w = g.weather;
-    const sub = g.park ? g.park + '.' : null;
-    if (!w) {
-      return section('cond', 'First-pitch conditions', sub, h('p', { class: 'cond-note' }, 'The forecast for this park was not available when the prediction ran.'));
-    }
+    const title = 'Home run conditions';
+    if (!w) return section('cond', title, null, h('p', { class: 'cond-note' }, 'The forecast for this park was not available when the prediction ran.'));
     const indoor = g.roof === 'dome' || w.wind_label === 'Indoors';
     const kids = [];
     if (indoor) {
-      kids.push(h('p', { class: 'cond-note' }, h('b', null, 'Dome. '), 'The model treats ' + (g.park || 'this park') + ' as indoors, so weather is not a factor.'));
+      kids.push(h('p', { class: 'cond-note dome' }, 'Dome'));
     } else {
-      const toCF = w.wind_label || '–';
       const wind = !w.wind_mph ? 'Calm' : Math.round(w.wind_mph) + ' mph' + (w.wind_from && w.wind_from !== '—' ? ' from ' + w.wind_from : '');
-      const cr = typeof w.carry_ft === 'number' ? Math.round(w.carry_ft) : null;
+      const cr = ok(w.carry_ft) ? Math.round(w.carry_ft) : null;
       const carry = cr === null ? '–' : (cr > 0 ? '+' : cr < 0 ? '−' : '') + Math.abs(cr) + ' ft';
-      const cell = (k, v) => h('div', null, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v));
-      const ok = (x) => typeof x === 'number' && Number.isFinite(x);
+      const dew = dewPointF(w);
+      const elev = elevationFt(g, w);
       kids.push(h('div', { class: 'wx' },
-        cell('Temperature', ok(w.temp_f) ? Math.round(w.temp_f) + '°F' : '–'),
-        cell('Humidity', ok(w.humidity_pct) ? Math.round(w.humidity_pct) + '%' : '–'),
-        cell('Pressure', ok(w.pressure_inhg) ? w.pressure_inhg.toFixed(2) + ' inHg' : '–'),
-        cell('Wind', wind),
-        cell('Toward center field', toCF),
-        cell('Carry change', carry)));
+        stat('Temperature', ok(w.temp_f) ? Math.round(w.temp_f) + '°F' : '–'),
+        stat('Humidity', ok(w.humidity_pct) ? Math.round(w.humidity_pct) + '%' : '–'),
+        stat('Dew point', dew === null ? '–' : dew + '°F'),
+        stat('Wind', wind, w.wind_label || null),
+        elev === null ? null : stat('Elevation', elev.toLocaleString('en-US') + ' ft'),
+        stat('Carry', carry)));
     }
-    if (typeof w.hr_score === 'number') {
+    if (ok(w.hr_score)) {
       const score = Math.max(0, Math.min(100, w.hr_score));
       const fill = h('div', { class: 'fill' + (score >= 55 ? ' hot' : '') });
       fill.style.width = score + '%';
@@ -354,7 +389,7 @@
           h('span', null, h('span', { class: 'hrnum' }, String(Math.round(score))), ' out of 100')),
         h('div', { class: 'track', 'aria-hidden': 'true' }, fill)));
     }
-    return section('cond', 'First-pitch conditions', sub, kids);
+    return section('cond', title, null, kids);
   }
 
   function totals(g) {
@@ -370,7 +405,7 @@
     return section('totals', 'Total runs', sub, h('div', { class: 'tot' }, lines.map((k) => {
       const p = m.total_over[k];
       const fill = h('div', { class: 'bar-fill' });
-      fill.style.width = (typeof p === 'number' && Number.isFinite(p) ? Math.max(0, Math.min(100, whole(p))) : 0) + '%';
+      fill.style.width = (ok(p) ? Math.max(0, Math.min(100, whole(p))) : 0) + '%';
       return h('div', { class: 'tot-row' },
         h('span', { class: 'tot-l' }, 'Over ' + k),
         h('div', { class: 'bar', 'aria-hidden': 'true' }, fill),
@@ -384,7 +419,7 @@
     const team = g[side + '_team'];
     if (!p) return h('div', { class: 'pit' }, h('div', { class: 'who' }, nick(team)), h('div', { class: 'nm' }, 'Starter not announced'));
     const res = finalResults(g);
-    const threw = res && res.starter_k && typeof res.starter_k[side] === 'number' ? res.starter_k[side] : null;
+    const threw = res && res.starter_k && ok(res.starter_k[side]) ? res.starter_k[side] : null;
     const ladder = Object.keys(p.k_over || {}).sort((a, b) => Number(a) - Number(b));
     const f = p.first_inning;
     return h('div', { class: 'pit' },
@@ -397,9 +432,15 @@
         h('div', { class: 'l' }, k + '+ K'),
         h('div', { class: 'v' }, pcell(p.k_over[k], 'k' + k)),
         mark(threw !== null && threw >= Number(k), 'reached')))),
-      h('p', { class: 'first' }, f
-        ? 'First inning over ' + f.starts + ' starts: ' + f.era.toFixed(2) + ' ERA, scoreless ' + f.scoreless + ' times, ' + dot3(f.opp_obp) + ' opponent OBP.'
-        : 'First-inning record not shown (fewer than 5 starts).'));
+      f
+        ? h('div', { class: 'fi' },
+          h('div', { class: 'fi-l' }, 'First inning'),
+          h('div', { class: 'stats' },
+            stat('NRFI record', (ok(f.scoreless) ? f.scoreless : '–') + '-' + (ok(f.not_scoreless) ? f.not_scoreless : '–')),
+            stat('ERA', fix2(f.era)),
+            stat('OBP', dot3(f.opp_obp)),
+            ok(f.whip) ? stat('WHIP', fix2(f.whip)) : null))
+        : h('p', { class: 'fi-none' }, 'First-inning record not shown (fewer than 5 starts).'));
   }
 
   function lineupTable(g, side) {
@@ -429,7 +470,7 @@
     }));
     const table = h('table', { class: 't' + (fin ? ' fin' : '') }, h('caption', { class: 'sr' }, team + ' batting order'), thead, tbody);
     return h('div', { class: 'lu' },
-      h('h3', null, nick(team) + ' batting order'),
+      h('h3', null, nick(team)),
       h('div', { class: 'scroll', tabindex: '0', role: 'region', 'aria-label': nick(team) + ' batting order table' }, table));
   }
 
@@ -442,8 +483,7 @@
           h('span', { class: 'rk' }, String(i + 1)),
           h('div', null,
             h('div', { class: 'name' }, p.name),
-            h('div', { class: 'meta' }, nick(p.team) + (p.home ? ' vs ' : ' at ') + nick(p.opponent) + '.'
-              + (r === null ? '' : r ? ' Got a hit.' : ' No hit.'))),
+            h('div', { class: 'meta' }, nick(p.team), r && r.line ? h('span', { class: 'line' }, r.line) : null)),
           pcell(p.hit, 'hit'));
       }))
       : h('p', { class: 'msg' }, 'Picks appear once lineups are posted.');
@@ -452,31 +492,26 @@
     return s;
   }
 
-  function readingGuide() {
+  function cutoffs() {
     const rows = [
-      ['Win chance', 'ml'], ['Ahead after 5 innings', 'f5'], ['No run in the 1st', 'nrfi'],
+      ['Odds to win', 'ml'], ['First 5 winner', 'f5'], ['No run in the 1st', 'nrfi'],
       ['Starter 3+ strikeouts', 'k3'], ['Starter 4+ strikeouts', 'k4'], ['Starter 5+ strikeouts', 'k5'],
       ['Starter 6+ strikeouts', 'k6'], ['Starter 7+ strikeouts', 'k7'],
       ['Batter 1+ hit', 'hit'], ['Batter 2+ total bases', 'tb'], ['Batter 1+ home run', 'hr'],
       ['Batter 1+ RBI', 'rbi'], ['Batter 1+ stolen base', 'sb'],
     ];
     const cut = (x) => whole(x) + '%';
-    return section('guide', 'How to read the numbers', null,
-      h('p', null, 'Every number is a probability from simulating the game thousands of times.'),
-      h('ul', { class: 'legend' },
-        h('li', null, h('span', { class: 'p p-strong' }, '74%'), h('span', null, 'Strong. It clears the cut-off for that market.')),
-        h('li', null, h('span', { class: 'p p-watch' }, '65%'), h('span', null, 'Worth watching.')),
-        h('li', null, h('span', { class: 'p p-low' }, '33%'), h('span', null, 'Below the watch line.'))),
-      h('details', { class: 'how' },
-        h('summary', null, 'Cut-off for every market'),
-        h('table', null,
-          h('caption', { class: 'sr' }, 'Strong and watch cut-offs for every market'),
-          h('thead', null, h('tr', null, h('th', { scope: 'col' }, 'Market'), h('th', { scope: 'col', class: 'r' }, 'Strong'), h('th', { scope: 'col', class: 'r' }, 'Watch'))),
-          h('tbody', null, rows.map(([label, key]) => h('tr', null,
-            h('td', null, label),
-            h('td', { class: 'r' }, cut(THRESH[key][0]) + '+'),
-            h('td', { class: 'r' }, cut(THRESH[key][1]) + '+'))))),
-        h('p', null, 'Home run conditions score, 0 to 100: 65 and up Very HR Friendly, 55 to 64 HR Friendly, 45 to 54 Neutral, 35 to 44 HR Suppressed, under 35 Very HR Suppressed. One point is about one foot of expected carry change. Indoor parks are scored a neutral 50.')));
+    return h('details', { class: 'how' },
+      h('summary', null, 'Cut-off for every market'),
+      h('p', { class: 'key' }, 'Yellow numbers on a green plate clear the strong cut-off, plain numbers clear the watch line, and grey numbers fall below it.'),
+      h('table', null,
+        h('caption', { class: 'sr' }, 'Strong and watch cut-offs for every market'),
+        h('thead', null, h('tr', null, h('th', { scope: 'col' }, 'Market'), h('th', { scope: 'col', class: 'r' }, 'Strong'), h('th', { scope: 'col', class: 'r' }, 'Watch'))),
+        h('tbody', null, rows.map(([label, key]) => h('tr', null,
+          h('td', null, label),
+          h('td', { class: 'r' }, cut(THRESH[key][0]) + '+'),
+          h('td', { class: 'r' }, cut(THRESH[key][1]) + '+'))))),
+      h('p', null, 'Home run conditions score, 0 to 100: 65 and up Very HR Friendly, 55 to 64 HR Friendly, 45 to 54 Neutral, 35 to 44 HR Suppressed, under 35 Very HR Suppressed. One point is about one foot of expected carry change. Indoor parks are scored a neutral 50.'));
   }
 
   // ---------- page ----------
@@ -508,9 +543,9 @@
       }
       boardSlot.replaceChildren(board(g, page.date));
       mainCol.replaceChildren(...[conditions(g), totals(g),
-        section('pitchers', 'Starting pitchers', 'Chance each starter reaches a strikeout total. A check means he got there.',
+        section('pitchers', 'Starting pitchers', 'Chance each starter reaches a strikeout total.',
           h('div', { class: 'pits' }, pitcher(g, 'away'), pitcher(g, 'home'))),
-        section('lineups', 'Lineups and player props', 'Chance of at least one hit, two total bases, a homer, an RBI and a steal. A check means it happened.',
+        section('lineups', 'Lineups and player props', 'Chance of at least one hit, two total bases, a homer, an RBI and a steal.',
           lineupTable(g, 'away'), lineupTable(g, 'home')),
       ].filter(Boolean));
     }
@@ -526,7 +561,7 @@
     }
     kids.push(boardSlot, h('div', { class: 'cols' },
       mainCol,
-      h('aside', { class: 'rail', 'aria-label': 'Beat the Streak and how to read the numbers' }, beatTheStreak(picks, games), readingGuide())));
+      h('aside', { class: 'rail', 'aria-label': 'Beat the Streak and cut-offs' }, beatTheStreak(picks, games), cutoffs())));
     app.replaceChildren(...kids);
     renderGame();
   }
