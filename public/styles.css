@@ -1,6 +1,6 @@
 /* diamondmetrics: MLB predictions. Outfield scoreboard look. Light theme only.
-   Fonts are self-hosted (SIL Open Font License, see fonts/). One meaning for yellow:
-   yellow numerals on a green plate mean strong; a yellow outline marks the half-inning being played. */
+   Fonts are self-hosted (SIL Open Font License, see fonts/). Yellow means only one thing:
+   yellow numerals on a green plate are strong. Lamps are green (pick came true), red (missed) or white (live). */
 
 @font-face {
   font-family: "Big Shoulders";
@@ -26,6 +26,8 @@
   --seam: #2B5B46;
   --white: #F4F5F0;
   --lamp: #F2C12E;
+  --hit: #7CF0A6;
+  --miss: #FF6B5E;
   --dim: #93AB9E;
   --label: #C9D6CE;
   --ground: #EDF0EA;
@@ -79,7 +81,7 @@ a:hover { color: var(--hover); }
 .links { display: flex; flex-wrap: wrap; column-gap: 8px; font-size: 15px; }
 .links a { display: inline-flex; align-items: center; min-height: 44px; padding: 0 10px; color: var(--label); text-decoration: none; }
 .links a:hover { color: #fff; }
-.links a[aria-current] { color: #fff; text-decoration: underline 3px var(--lamp); text-underline-offset: 9px; }
+.links a[aria-current] { color: #fff; text-decoration: underline 3px var(--white); text-underline-offset: 9px; }
 
 /* ---------- countdown ---------- */
 .countdown { padding-top: 24px; display: flex; flex-wrap: wrap; align-items: center; column-gap: 14px; row-gap: 8px; }
@@ -113,16 +115,18 @@ h1 + .upd { margin-top: 14px; }
 .b-low { color: var(--dim); }
 .cap { margin-top: 5px; font-size: 13px; color: var(--label); white-space: nowrap; }
 
-/* lamps */
+/* lamps: unlit, live (white), pick came true (green), pick missed (red) */
 .lamp { flex: none; display: inline-block; width: 14px; height: 14px; border-radius: 50%; background: var(--plate); box-shadow: inset 0 0 0 2px var(--seam); }
-.lamp.on { background: #FFF8D6; box-shadow: 0 0 0 2px var(--lamp), 0 0 10px 2px rgba(242, 193, 46, .65); }
+.lamp.on { background: var(--white); box-shadow: 0 0 0 2px rgba(244, 245, 240, .35), 0 0 10px 2px rgba(244, 245, 240, .55); }
+.lamp.hit { background: var(--hit); box-shadow: 0 0 0 2px rgba(124, 240, 166, .35), 0 0 10px 2px rgba(124, 240, 166, .55); }
+.lamp.miss { background: var(--miss); box-shadow: 0 0 0 2px rgba(255, 107, 94, .35), 0 0 10px 2px rgba(255, 107, 94, .55); }
 
 /* out-of-town board */
 .oot h2 { margin: 0 0 16px; font-family: var(--display); font-weight: 800; font-size: 28px; line-height: 1; color: var(--white); }
 .oot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
 .gm { font: inherit; color: var(--white); background: transparent; border: 0; box-shadow: inset 0 0 0 1px var(--seam); border-radius: 4px; min-width: 0; min-height: 44px; padding: 8px 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; text-align: left; cursor: pointer; }
 .gm:hover { background: var(--seam); }
-.gm[aria-pressed="true"] { background: var(--seam); outline: 2px solid var(--lamp); outline-offset: -2px; }
+.gm[aria-pressed="true"] { background: var(--seam); outline: 2px solid var(--white); outline-offset: -2px; }
 .gm[aria-pressed="true"]:focus-visible { outline-width: 3px; outline-offset: 2px; }
 .gm-t { font-family: var(--display); font-weight: 800; font-size: 22px; line-height: 1; }
 .gm-at { font-size: 14px; color: var(--label); }
@@ -145,7 +149,7 @@ h1 + .upd { margin-top: 14px; }
 .ls .rhe.first { border-left: 2px solid var(--seam); padding-left: 10px; }
 .ip { display: flex; align-items: center; justify-content: center; width: 34px; height: 40px; margin: 0 auto; background: var(--plate); border-radius: 3px; box-shadow: inset 0 2px 3px rgba(0, 0, 0, .5); font-family: var(--display); font-weight: 700; font-size: 28px; line-height: 1; color: var(--white); }
 .ip.big { width: 44px; height: 48px; font-size: 34px; }
-.ip.cur { outline: 2px solid var(--lamp); outline-offset: -2px; }
+.ip.cur { outline: 2px solid var(--white); outline-offset: -2px; }
 
 /* main board: model numbers, below the line score */
 .model { margin-top: 18px; padding-top: 6px; border-top: 2px solid var(--seam); }
@@ -156,9 +160,11 @@ h1 + .upd { margin-top: 14px; }
 .nick { display: block; font-family: var(--display); font-weight: 800; font-size: 48px; line-height: 1; color: var(--white); white-space: nowrap; }
 .pitch { display: block; margin-top: 6px; font-size: 14px; font-weight: 400; color: var(--label); white-space: nowrap; }
 
+/* result lamps: one per board market */
 .lamprow { margin-top: 14px; padding-top: 14px; border-top: 2px solid var(--seam); }
-.lr-nr { font-size: 15px; color: var(--white); }
-.lr-nr .lamp { margin-right: 8px; vertical-align: -1px; }
+.lr { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 32px; font-size: 15px; color: var(--white); }
+.lr li { white-space: nowrap; }
+.lr .lamp { margin-right: 8px; vertical-align: -1px; }
 .num { font-family: var(--display); font-weight: 800; font-size: 22px; line-height: 1; }
 
 /* ---------- below the board ---------- */
@@ -171,12 +177,14 @@ h1 + .upd { margin-top: 14px; }
 .sec > .subl { margin-bottom: 18px; }
 .sec > h2 + .cond-note, .sec > h2 + .wx { margin-top: 14px; }
 .sec > h2 + .hrbox { margin-top: 14px; }
+.sec > h2 + .lu { margin-top: 14px; }
 
 /* probability chips in tables: strong = yellow on a plate, watch = ink, low = grey */
 .p { display: inline-block; font-weight: 600; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
 .p-strong { background: var(--plate); color: var(--lamp); box-shadow: inset 0 1px 2px rgba(0, 0, 0, .45); }
 .p-watch { color: var(--ink); }
 .p-low { color: var(--low); }
+/* the slot for a check mark or a result icon, so numbers stay aligned */
 .ck { display: inline-flex; align-items: center; width: 18px; justify-content: flex-end; vertical-align: middle; }
 .ck svg { display: block; }
 
@@ -202,12 +210,15 @@ h1 + .upd { margin-top: 14px; }
 .bar-fill { height: 18px; background: var(--bar); }
 .tot-v { font-weight: 600; text-align: right; }
 
-/* pitchers */
+/* battery */
 .pits { display: flex; flex-wrap: wrap; gap: 32px; }
 .pit { flex: 1 1 280px; min-width: 0; border-top: 3px solid var(--board); padding-top: 14px; }
 .pit .who { font-size: 14px; color: var(--muted); }
 .pit .nm { margin-top: 2px; font-family: var(--display); font-weight: 700; font-size: 32px; line-height: 1.05; }
-.pit .ks { margin-top: 8px; font-size: 15px; }
+.kou { margin-top: 10px; }
+.kou-l { font-size: 13px; font-weight: 600; color: var(--muted); }
+.kou-v { margin-top: 2px; display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 15px; }
+.kou-v b { font-size: 17px; font-weight: 700; }
 .ladder { margin-top: 12px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
 .rung { text-align: center; }
 .rung .l { font-size: 13px; color: var(--muted); }
@@ -230,7 +241,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 15px; }
 .t .rs { text-align: left; padding-left: 16px; color: var(--muted); }
 .pv { display: inline-flex; align-items: center; justify-content: flex-end; }
 .t th.v { padding-right: 12px; }       /* cell padding + the chip's side padding: header ends over the number */
-.t.fin th.v { padding-right: 30px; }  /* plus the 18px check slot on final games */
+.t.fin th.v { padding-right: 30px; }  /* plus the 18px icon slot on final games */
 
 /* rail: Beat the Streak */
 .bts { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--rule); }
@@ -307,6 +318,7 @@ footer .wrap { padding-top: 28px; padding-bottom: 28px; display: flex; flex-wrap
   .plate .pc { font-size: 19px; }
   .cap { font-size: 12px; }
   .lamprow { margin-top: 4px; }
+  .lr { gap: 10px 20px; }
 
   .cols { margin-top: 36px; }
   .sec h2 { font-size: 30px; }

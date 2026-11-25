@@ -83,29 +83,44 @@
     return el;
   }
 
-  function check() {
+  // A small line icon on a 16-unit grid. label null: decorative (hidden from screen readers).
+  function svgIcon(shapes, size, label) {
     const s = document.createElementNS(SVGNS, 'svg');
-    s.setAttribute('viewBox', '0 0 16 16');
-    s.setAttribute('width', '16');
-    s.setAttribute('height', '16');
-    s.setAttribute('aria-hidden', 'true');
-    s.setAttribute('focusable', 'false');
-    const p = document.createElementNS(SVGNS, 'path');
-    p.setAttribute('d', 'M3 8.5l3.2 3.2L13 4.5');
-    p.setAttribute('fill', 'none');
-    p.setAttribute('stroke', '#2E7A4F');
-    p.setAttribute('stroke-width', '2.4');
-    p.setAttribute('stroke-linecap', 'round');
-    p.setAttribute('stroke-linejoin', 'round');
-    s.append(p);
+    for (const [k, v] of [['viewBox', '0 0 16 16'], ['width', size], ['height', size], ['focusable', 'false'], ['class', 'ico']]) s.setAttribute(k, String(v));
+    if (label) { s.setAttribute('role', 'img'); s.setAttribute('aria-label', label); } else s.setAttribute('aria-hidden', 'true');
+    for (const [tag, attrs] of shapes) {
+      const el = document.createElementNS(SVGNS, tag);
+      const all = { fill: 'none', stroke: '#2E7A4F', 'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', ...attrs };
+      for (const [k, v] of Object.entries(all)) el.setAttribute(k, v);
+      s.append(el);
+    }
     return s;
   }
 
-  // A check mark with words for screen readers, in a fixed-width slot so numbers stay aligned.
-  const mark = (yes, words) => h('span', { class: 'ck' }, yes ? [check(), h('span', { class: 'sr' }, ' ' + words)] : null);
+  const CHECK = [['path', { d: 'M3 8.5l3.2 3.2L13 4.5', 'stroke-width': '2.4' }]];
+  // Lineup result icons, one per batter prop.
+  const ICONS = {
+    // A filled bat laid on the diagonal: knob, thin handle, tapering out to a rounded barrel.
+    hit: {
+      label: 'got a hit',
+      shapes: [['path', {
+        d: 'M-5.7-.75H-1C2-.75 3-2.5 5.5-2.5A2.5 2.5 0 0 1 5.5 2.5C3 2.5 2 .75-1 .75H-5.7A1.5 1.5 0 1 1-5.7-.75z',
+        transform: 'translate(8 8) rotate(-45)', fill: '#2E7A4F', stroke: 'none',
+      }]],
+    },
+    tb: { label: 'two or more bases', shapes: [['path', { d: 'M3 8.5l3.2 3.2L13 4.5', 'stroke-width': '2.2' }]] },
+    hr: { label: 'homered', shapes: [['circle', { cx: '8', cy: '8', r: '5.8' }], ['path', { d: 'M4.8 3.6c1.5 1.3 2.2 2.7 2.2 4.4s-.7 3.1-2.2 4.4', 'stroke-width': '1.2' }], ['path', { d: 'M11.2 3.6C9.7 4.9 9 6.3 9 8s.7 3.1 2.2 4.4', 'stroke-width': '1.2' }]] },
+    rbi: { label: 'drove in a run', shapes: [['path', { d: 'M3 2.8h10v6L8 13.4 3 8.8z' }]] },
+    sb: { label: 'stole a base', shapes: [['path', { d: 'M8 2.4L13.6 8 8 13.6 2.4 8z' }]] },
+  };
 
-  // A board lamp. Decorative: the text next to it carries the meaning.
-  const lamp = (on) => h('span', { class: 'lamp' + (on ? ' on' : ''), 'aria-hidden': 'true' });
+  // A check mark with words for screen readers, in a fixed-width slot so numbers stay aligned.
+  const mark = (yes, words) => h('span', { class: 'ck' }, yes ? [svgIcon(CHECK, 16, null), h('span', { class: 'sr' }, ' ' + words)] : null);
+  // A lineup result icon in the same slot; the icon itself carries the words.
+  const propMark = (yes, kind) => h('span', { class: 'ck' }, yes ? svgIcon(ICONS[kind].shapes, 14, ICONS[kind].label) : null);
+
+  // A board lamp. Decorative: the text next to it carries the meaning. state: '' (unlit), 'on' (live), 'hit' or 'miss'.
+  const lamp = (state) => h('span', { class: 'lamp' + (state ? ' ' + state : ''), 'aria-hidden': 'true' });
 
   // ---------- number and date formatting ----------
   const ok = (x) => typeof x === 'number' && Number.isFinite(x);
@@ -113,6 +128,7 @@
   const whole = (p) => Math.round(Number((p * 100).toPrecision(12)));
   const wholePct = (r) => (r <= 0 ? '<1%' : r >= 100 ? '>99%' : r + '%');
   const pct = (p) => (ok(p) ? wholePct(whole(p)) : '–');
+  const dist = (p) => Number(Math.abs(p - 0.5).toPrecision(12)); // so 0.45 and 0.55 count as the same distance from 50%
 
   function tier(p, key) {
     const t = THRESH[key];
@@ -125,11 +141,9 @@
   const btier = (p, key) => tier(p, key).replace('p-', 'b-');
 
   const pcell = (p, key) => h('span', { class: 'p ' + tier(p, key) }, pct(p));
-  const num1 = (x) => (ok(x) ? x.toFixed(1) : '–');
-  const trim1 = (x) => num1(x).replace(/\.0$/, '');
   const fix2 = (x) => (ok(x) ? x.toFixed(2) : '–');
   const dot3 = (x) => (ok(x) ? x.toFixed(3).replace(/^0\./, '.') : '–');
-  const runs = (x) => (ok(x) ? trim1(x) + (x === 1 ? ' run' : ' runs') : '–');
+  const runs = (x) => (ok(x) ? x.toFixed(1).replace(/\.0$/, '') + (x === 1 ? ' run' : ' runs') : '–');
 
   function ymd(s) {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || '');
@@ -265,17 +279,22 @@
     return null;
   }
 
-  // The total-runs line shown on the board: the .5 line whose over chance is closest to 50%; on a tie, the higher line.
-  function ouLine(over) {
+  // The over/under line closest to even: of the lines in `over` (key -> chance of going over), the one whose
+  // unrounded chance is closest to 50%; on a tie, the higher line. lineOf turns a key into the line number.
+  function closestLine(over, lineOf) {
     let best = null;
     for (const k of Object.keys(over || {})) {
       const p = over[k];
-      if (!k.endsWith('.5') || !ok(p)) continue;
-      const d = Number(Math.abs(p - 0.5).toPrecision(12)); // so 0.45 and 0.55 count as the same distance
-      if (!best || d < best.d || (d === best.d && Number(k) > Number(best.k))) best = { k, d, over: whole(p) };
+      const line = lineOf(k);
+      if (line === null || !ok(p)) continue;
+      const d = dist(p);
+      if (!best || d < best.d || (d === best.d && line > best.line)) best = { line, d, p, over: whole(p) };
     }
     return best;
   }
+  // Total runs: the .5 keys of markets.total_over. Strikeouts: k_over[n] is n or more, the over on line n - 0.5.
+  const ouLine = (over) => closestLine(over, (k) => (k.endsWith('.5') ? Number(k) : null));
+  const kLine = (over) => closestLine(over, (k) => (/^\d+$/.test(k) ? Number(k) - 0.5 : null));
 
   // Dew point in whole °F: the file's value, or Magnus from temperature and humidity (the engine's constants 6.1078, 7.5, 237.3).
   function dewPointF(w) {
@@ -307,8 +326,7 @@
 
   // The board's top line: park, then first pitch, the date, or a stopped game's status; a lit lamp while live.
   function topLine(g, date, ls) {
-    const indoor = g.roof === 'dome' || (g.weather && g.weather.wind_label === 'Indoors');
-    const where = g.park ? g.park + (indoor ? ', indoors.' : '.') : null;
+    const where = g.park ? g.park + '.' : null;
     const day = longDate(date);
     const first = clock(g.start_time_utc);
     let when;
@@ -323,7 +341,7 @@
       if (g.status === 'live') live = liveText(g);
     }
     return [h('p', { class: 'bd-where' }, [where, when].filter(Boolean).join(' ')),
-      live ? h('p', { class: 'bd-live' }, lamp(true), live) : null];
+      live ? h('p', { class: 'bd-live' }, lamp('on'), live) : null];
   }
 
   // The line score: a plate per inning (at least nine), then R, H and E. ls is null before it loads or when it can't be fetched.
@@ -371,16 +389,69 @@
       h('tbody', null, row('away'), row('home')));
   }
 
-  function board(g, date) {
+  // The model's pick for each board market and whether it came true (page.json results only).
+  // Each item: { cls, label (text and nodes), pick (null when even), hit (true, false, or null when unknown) }.
+  function boardPicks(g) {
     const m = g.markets || {};
     const res = finalResults(g);
+    const items = [];
+
+    // Winner: the higher unrounded win chance; exactly even means no pick.
+    const aw = m.away_win;
+    const hw = m.home_win;
+    if (ok(aw) && ok(hw)) {
+      const pick = aw === hw || aw === 0.5 || hw === 0.5 ? null : aw > hw ? 'away' : 'home';
+      let hit = null;
+      if (pick && res && ok(res.away_score) && ok(res.home_score) && res.away_score !== res.home_score) {
+        hit = (res.away_score > res.home_score ? 'away' : 'home') === pick;
+      }
+      items.push({ cls: 'lr-win', label: ['Winner ', pick ? nick(g[pick + '_team']) : 'even'], pick, hit });
+    }
+
+    // First 5: the highest of away, home and tie; a tie for the top means no pick.
+    const f5 = { away: m.f5_away, home: m.f5_home, tie: m.f5_tie };
+    if (Object.values(f5).every(ok)) {
+      const top = Math.max(f5.away, f5.home, f5.tie);
+      const leaders = Object.keys(f5).filter((k) => f5[k] === top);
+      const pick = leaders.length === 1 ? leaders[0] : null;
+      const led = res ? res.led_after_5 : null;
+      const hit = pick && (led === 'away' || led === 'home' || led === 'tie') ? led === pick : null;
+      items.push({ cls: 'lr-f5', label: ['First 5 ', pick === 'tie' ? 'Tie' : pick ? nick(g[pick + '_team']) : 'even'], pick, hit });
+    }
+
+    // Total runs: Over or Under on the board's line, whichever is likelier.
+    const ou = ouLine(m.total_over);
+    if (ou) {
+      const pick = ou.p > 0.5 ? 'over' : ou.p < 0.5 ? 'under' : null;
+      const hit = pick && res && ok(res.total_runs) ? (res.total_runs > ou.line) === (pick === 'over') : null;
+      items.push({ cls: 'lr-tot', label: pick ? ['Total ', pick === 'over' ? 'Over ' : 'Under ', String(ou.line)] : ['Total ', String(ou.line), ' even'], pick, hit });
+    }
+
+    // NRFI: no run in the 1st when the chance is above 50%, otherwise YRFI with the other side of the number.
+    const p = m.no_run_first;
+    const nrPick = ok(p) ? (p > 0.5 ? 'nrfi' : p < 0.5 ? 'yrfi' : null) : null;
+    const rif = res ? res.run_in_first : null;
+    items.push({
+      cls: 'lr-nr',
+      label: nrPick === 'yrfi'
+        ? ['YRFI ', num(wholePct(100 - whole(p)), 'b-plain')]
+        : ['NRFI ', num(pct(p), btier(p, 'nrfi'))],
+      pick: nrPick,
+      hit: nrPick && typeof rif === 'boolean' ? (nrPick === 'nrfi' ? !rif : rif) : null,
+    });
+    return items;
+  }
+
+  function board(g, date) {
+    const m = g.markets || {};
+    const fin = g.status === 'final';
     const ou = ouLine(m.total_over);
 
     // Sportsbook layout: the away row shows the over, the home row the under, for the same line; the pair adds to 100.
     function ouCell(side) {
       if (!ou) return plate('–', 'b-plain');
       const over = side === 'away';
-      return plate(wholePct(over ? ou.over : 100 - ou.over), 'b-plain', (over ? 'Over ' : 'Under ') + ou.k);
+      return plate(wholePct(over ? ou.over : 100 - ou.over), 'b-plain', (over ? 'Over ' : 'Under ') + ou.line);
     }
 
     function row(side) {
@@ -404,13 +475,17 @@
         h('th', { scope: 'col' }, 'Total runs O/U'))),
       h('tbody', null, row('away'), row('home')));
 
-    // The lamp shows only where the result is a known yes or no.
-    const nrLit = res && typeof res.run_in_first === 'boolean' ? !res.run_in_first : null;
-    const lamps = h('div', { class: 'lamprow' },
-      h('p', { class: 'lr-nr' },
-        nrLit === null ? null : lamp(nrLit),
-        'NRFI ', num(pct(m.no_run_first), btier(m.no_run_first, 'nrfi')),
-        nrLit ? h('span', { class: 'sr' }, ' It happened.') : null));
+    // Result lamps: unlit before and during the game; on a final, green if the pick came true and red if it missed.
+    // No lamp when there is no pick, or the result isn't in page.json.
+    const lamps = h('div', { class: 'lamprow' }, h('ul', { class: 'lr' }, boardPicks(g).map((it) => {
+      let state = null;
+      if (it.pick && !fin) state = '';
+      else if (it.pick && it.hit !== null) state = it.hit ? 'hit' : 'miss';
+      return h('li', { class: it.cls },
+        state === null ? null : lamp(state),
+        it.label,
+        state === 'hit' || state === 'miss' ? h('span', { class: 'sr' }, state === 'hit' ? " Model's pick came true." : " Model's pick missed.") : null);
+    })));
 
     const top = h('div', { class: 'bd-top' }, topLine(g, date, null));
     // The scroll box stays in place across refreshes, so keyboard focus on it is kept.
@@ -512,13 +587,16 @@
     const res = finalResults(g);
     const threw = res && res.starter_k && ok(res.starter_k[side]) ? res.starter_k[side] : null;
     const ladder = Object.keys(p.k_over || {}).sort((a, b) => Number(a) - Number(b));
+    const kl = kLine(p.k_over);
     const f = p.first_inning;
     return h('div', { class: 'pit' },
       h('div', { class: 'who' }, nick(team)),
       h('div', { class: 'nm' }, p.name),
-      h('p', { class: 'ks' },
-        'Median ', h('b', null, trim1(p.median_k)), p.median_k === 1 ? ' strikeout.' : ' strikeouts.',
-        threw !== null ? [' Threw ', h('b', null, String(threw)), '.'] : null),
+      kl ? h('div', { class: 'kou' },
+        h('div', { class: 'kou-l' }, 'Strikeouts O/U ' + kl.line),
+        h('div', { class: 'kou-v' },
+          h('span', null, 'Over ', h('b', null, wholePct(kl.over))),
+          h('span', null, 'Under ', h('b', null, wholePct(100 - kl.over))))) : null,
       h('div', { class: 'ladder' }, ladder.map((k) => h('div', { class: 'rung' },
         h('div', { class: 'l' }, k + '+ K'),
         h('div', { class: 'v' }, pcell(p.k_over[k], 'k' + k)),
@@ -541,7 +619,7 @@
     const fin = !!(res && res.batters);
     const byId = {};
     if (fin) for (const r of res.batters[side] || []) byId[r.id] = r;
-    const cell = (p, key, yes) => h('td', null, h('span', { class: 'pv' }, pcell(p, key), fin ? mark(yes, 'happened') : null));
+    const cell = (p, key, kind, yes) => h('td', null, h('span', { class: 'pv' }, pcell(p, key), fin ? propMark(yes, kind) : null));
     const thead = h('thead', null, h('tr', null,
       h('th', { class: 'o', scope: 'col' }, '#'),
       h('th', { class: 'l', scope: 'col' }, 'Player'),
@@ -552,11 +630,11 @@
       return h('tr', null,
         h('td', { class: 'o' }, String(r.slot)),
         h('td', { class: 'n' }, r.name),
-        cell(r.hit, 'hit', b && b.h >= 1),
-        cell(r.tb2, 'tb', b && b.tb >= 2),
-        cell(r.hr, 'hr', b && b.hr >= 1),
-        cell(r.rbi, 'rbi', b && b.rbi >= 1),
-        cell(r.sb, 'sb', b && b.sb >= 1),
+        cell(r.hit, 'hit', 'hit', b && b.h >= 1),
+        cell(r.tb2, 'tb', 'tb', b && b.tb >= 2),
+        cell(r.hr, 'hr', 'hr', b && b.hr >= 1),
+        cell(r.rbi, 'rbi', 'rbi', b && b.rbi >= 1),
+        cell(r.sb, 'sb', 'sb', b && b.sb >= 1),
         fin ? h('td', { class: 'rs' }, b ? b.line : '–') : null);
     }));
     const table = h('table', { class: 't' + (fin ? ' fin' : '') }, h('caption', { class: 'sr' }, team + ' batting order'), thead, tbody);
@@ -690,9 +768,9 @@
       const b = board(g, page.date);
       boardSlot.replaceChildren(b);
       mainCol.replaceChildren(...[conditions(g), totals(g),
-        section('pitchers', 'Starting pitchers', 'Chance each starter reaches a strikeout total.',
+        section('pitchers', replay ? 'Battery' : "Today's battery", 'Chance each starter reaches a strikeout total.',
           h('div', { class: 'pits' }, pitcher(g, 'away'), pitcher(g, 'home'))),
-        section('lineups', 'Lineups and player props', 'Chance of at least one hit, two total bases, a homer, an RBI and a steal.',
+        section('lineups', 'Lineups and player props', null,
           lineupTable(g, 'away'), lineupTable(g, 'home')),
       ].filter(Boolean));
       score.show(g, b);

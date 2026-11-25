@@ -2,7 +2,7 @@
 Expected values are computed here from page.json and the line-score fixtures with separate code (Decimal rounding, not the
 page's JS), then compared with what the browser actually shows. The static test server has no Worker, so /api/linescore/*
 is answered with page.route from tests/fixtures/. Full-page screenshots go to tests/screens/ (ignored by git)."""
-import copy, json, os, shutil, subprocess, sys, tempfile, time
+import copy, json, os, shutil, socket, subprocess, sys, tempfile, time
 from decimal import Decimal, ROUND_HALF_UP
 from playwright.sync_api import sync_playwright
 
@@ -14,6 +14,8 @@ PORT_MAIN, PORT_SEASON, PORT_ERR = 8765, 8766, 8767
 RESULTS = []
 
 YELLOW, GREEN = "rgb(242, 193, 46)", "rgb(31, 74, 56)"
+WHITE, HIT, MISS, UNLIT = "rgb(244, 245, 240)", "rgb(124, 240, 166)", "rgb(255, 107, 94)", "rgb(22, 54, 40)"
+ICON_LABEL = {"hit": "got a hit", "tb": "two or more bases", "hr": "homered", "rbi": "drove in a run", "sb": "stole a base"}
 
 
 def check(name, ok, detail=""):
@@ -67,6 +69,76 @@ def OU(total_over):
     _, _, k, p = min(cands)
     over = W(p)
     return [f"Over {k}", f"Under {k}"], [WP(over), WP(100 - over)]
+
+
+def PICKS(g):
+    """Expected result lamps, one per board market: (visible label, lamp) where lamp is None (no lamp), 'unlit', 'hit' or 'miss'.
+    The pick is the likelier side on unrounded values; exactly even means no pick. Results come from page.json only."""
+    D, half = (lambda x: Decimal(str(x))), Decimal("0.5")
+    m = g["markets"]
+    fin = g["status"] == "final"
+    res = g.get("results") if fin else None
+    got = lambda k: res.get(k) if res else None
+
+    def lamp(pick, hit):
+        if pick is None:
+            return None
+        if not fin:
+            return "unlit"
+        return None if hit is None else ("hit" if hit else "miss")
+
+    out = []
+    aw, hw = D(m["away_win"]), D(m["home_win"])
+    pick = None if aw == hw or half in (aw, hw) else ("away" if aw > hw else "home")
+    a, h = got("away_score"), got("home_score")
+    hit = (("away" if a > h else "home") == pick) if pick and a is not None and h is not None and a != h else None
+    out.append((f"Winner {NICK[g[pick + '_team']] if pick else 'even'}", lamp(pick, hit)))
+
+    f5 = {"away": D(m["f5_away"]), "home": D(m["f5_home"]), "tie": D(m["f5_tie"])}
+    leaders = [k for k, v in f5.items() if v == max(f5.values())]
+    pick = leaders[0] if len(leaders) == 1 else None
+    led = got("led_after_5")
+    hit = (led == pick) if pick and led in ("away", "home", "tie") else None
+    out.append((f"First 5 {'Tie' if pick == 'tie' else NICK[g[pick + '_team']] if pick else 'even'}", lamp(pick, hit)))
+
+    _, _, k, p = min((abs(D(v) - half), -D(kk), kk, v) for kk, v in m["total_over"].items() if kk.endswith(".5"))
+    p = D(p)
+    pick = "over" if p > half else "under" if p < half else None
+    t = got("total_runs")
+    hit = ((Decimal(t) > D(k)) == (pick == "over")) if pick and t is not None else None
+    out.append((f"Total {'Over' if pick == 'over' else 'Under'} {k}" if pick else f"Total {k} even", lamp(pick, hit)))
+
+    p = D(m["no_run_first"])
+    pick = "nrfi" if p > half else "yrfi" if p < half else None
+    rif = got("run_in_first")
+    hit = ((not rif) if pick == "nrfi" else rif) if pick and isinstance(rif, bool) else None
+    out.append((f"YRFI {WP(100 - W(p))}" if pick == "yrfi" else f"NRFI {PCT(p)}", lamp(pick, hit)))
+    return out
+
+
+def KOU(k_over):
+    """Strikeout O/U: k_over[n] is n or more, the over on line n - 0.5; the line closest to even, higher on a tie."""
+    _, _, n, p = min((abs(Decimal(str(v)) - Decimal("0.5")), -int(kk), kk, v) for kk, v in k_over.items())
+    over = W(p)
+    return [f"Strikeouts O/U {int(n) - 1}.5", f"Over {WP(over)}", f"Under {WP(100 - over)}"]
+
+
+LAMPS_JS = """() => [...document.querySelectorAll('.lr li')].map(li => {
+    const l = li.querySelector('.lamp'), sr = li.querySelector('.sr');
+    const text = [...li.childNodes].filter(n => !(n.classList && (n.classList.contains('lamp') || n.classList.contains('sr'))))
+      .map(n => n.textContent).join('').replace(/\\s+/g, ' ').trim();
+    const state = !l ? null : l.classList.contains('hit') ? 'hit' : l.classList.contains('miss') ? 'miss' : l.classList.contains('on') ? 'on' : 'unlit';
+    return [text, state, sr ? sr.textContent : ''];
+})"""
+
+
+def lamps(pg):
+    return [tuple(x) for x in pg.evaluate(LAMPS_JS)]
+
+
+def lamps_expect(g):
+    words = {"hit": " Model's pick came true.", "miss": " Model's pick missed."}
+    return [(t, s, words.get(s, "")) for t, s in PICKS(g)]
 
 
 def DEW(temp_f, rh):
@@ -133,11 +205,29 @@ def norm(s):
     return " ".join(s.split())
 
 
+class Server:
+    """The test server. On Windows a venv's python.exe is a launcher that starts the real interpreter as a child, so
+    stopping it means stopping the whole process tree; otherwise an orphan keeps the port and serves an old folder."""
+
+    def __init__(self, proc):
+        self.proc = proc
+
+    def terminate(self):
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            self.proc.terminate()
+        self.proc.wait(timeout=10)
+
+
 def start_server(root, port, spa=False):
+    with socket.socket() as s:  # a server already on this port would answer for the wrong folder
+        if s.connect_ex(("127.0.0.1", port)) == 0:
+            sys.exit(f"port {port} is already in use (a test server left over from an earlier run?); stop it and run again")
     cmd = [sys.executable, os.path.join(HERE, "serve.py"), root, "--port", str(port)] + (["--spa"] if spa else [])
     p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.8)
-    return p
+    return Server(p)
 
 
 def new_ctx(browser, w=1280, h=900, tz="America/New_York"):
@@ -244,18 +334,21 @@ def screenshot(pg, name):
 
 
 def lineup_expect(g, side, by_id):
-    """Expected text of each row and the number of check marks, from the box score."""
-    rows, checks = [], 0
+    """Expected text of each row, the result icons' labels in order, and the icon count, from the box score."""
+    rows, icons, n = [], [], 0
     for row in g["lineups"][side]:
         b = by_id.get(row["id"])
-        cells = [str(row["slot"]), row["name"]]
-        for k, rk, need in (("hit", "h", 1), ("tb2", "tb", 2), ("hr", "hr", 1), ("rbi", "rbi", 1), ("sb", "sb", 1)):
+        cells, labels = [str(row["slot"]), row["name"]], []
+        for k, rk, need, kind in (("hit", "h", 1, "hit"), ("tb2", "tb", 2, "tb"), ("hr", "hr", 1, "hr"), ("rbi", "rbi", 1, "rbi"), ("sb", "sb", 1, "sb")):
             yes = b is not None and b[rk] >= need
-            checks += yes
-            cells.append(PCT(row[k]) + (" happened" if yes else ""))
+            n += yes
+            cells.append(PCT(row[k]))
+            if yes:
+                labels.append(ICON_LABEL[kind])
         cells.append(b["line"] if b else "–")
         rows.append(cells)
-    return rows, checks
+        icons.append(labels)
+    return rows, icons, n
 
 
 def fi_expect(fi):
@@ -299,6 +392,27 @@ def sweep(pg, label):
         rows = pg.evaluate(WRAPPERS)
         bad = [r for r in rows if r[3] > r[4] or (r[5] <= r[2] and r[1] > r[2])]
         check(f"{label} {w}: no scroll wrapper overflows unless its table can't fit", rows and not bad and no_hscroll(pg), bad or rows)
+
+
+# Yellow (#F2C12E) is allowed in exactly these places: strong numbers on the board (.b-strong) and in the tables (.p-strong),
+# the hot home-run bar (.fill.hot), and keyboard focus rings. The brand mark's yellow second base is the logo and is exempt too.
+YELLOW_JS = """() => {
+    const Y = '242, 193, 46';
+    const allowed = '.b-strong, .b-strong *, .p-strong, .p-strong *, .fill.hot, .brand .mark, .brand .mark *';
+    return [...document.querySelectorAll('body *')].filter(e => {
+        if (e.matches(allowed)) return false;
+        const c = getComputedStyle(e);
+        const vals = [c.color, c.backgroundColor, c.borderTopColor, c.borderRightColor, c.borderBottomColor, c.borderLeftColor,
+                      c.boxShadow, c.textDecorationColor, c.fill, c.stroke];
+        if (!e.matches(':focus-visible')) vals.push(c.outlineStyle === 'none' ? '' : c.outlineColor);
+        return vals.some(v => v.includes(Y));
+    }).map(e => e.tagName.toLowerCase() + (e.className && e.className.baseVal === undefined ? '.' + e.className.split(' ').join('.') : ''));
+}"""
+
+
+def yellow_offenders(pg):
+    pg.evaluate("document.activeElement && document.activeElement.blur()")
+    return pg.evaluate(YELLOW_JS)
 
 
 def plate_tops_aligned(pg):
@@ -362,7 +476,8 @@ def test_real(browser, base):
 
     # ---------- the board: line score ----------
     check("board: has id today", pg.locator("section#today.board").count() == 1)
-    check("board: top line (park, indoors, game date with no timezone shift)", tc(pg, ".bd-where") == ["Tropicana Field, indoors. Wednesday, October 28, 2026."], tc(pg, ".bd-where"))
+    check("board: top line (park and game date with no timezone shift, no 'indoors')", tc(pg, ".bd-where") == ["Tropicana Field. Wednesday, October 28, 2026."], tc(pg, ".bd-where"))
+    check("board: 'indoors' appears nowhere on the board", "indoors" not in pg.evaluate("document.querySelector('.board').textContent"))
     check("board: no live line on a final game", pg.locator(".bd-live").count() == 0)
     check("line score: header 1 to 9, then R H E", ls_head(pg) == ["Team", "1", "2", "3", "4", "5", "6", "7", "8", "9", "R", "H", "E"], ls_head(pg))
     exp_ls = LS(ws5, "MIL", "TB")
@@ -401,12 +516,16 @@ def test_real(browser, base):
     check("board: no 'led after 5' caption and no score column", "led after 5" not in tc(pg, ".board") and pg.locator(".bd .last").count() == 0)
     check("board: the % sign is its own smaller span", pg.locator(".bd .plate .pc").count() == 6)
 
-    # lamp row: NRFI only (WS5: no run in the 1st -> lit)
-    nr_lit = res["run_in_first"] is False
-    check("lamps: NRFI is the only item, with its tier", tc(pg, ".lamprow") == [f"NRFI {PCT(m['no_run_first'])}" + (" It happened." if nr_lit else "")] and classes(pg, ".lamprow .num") == [f"num {BT(m['no_run_first'], 'nrfi')}"], (tc(pg, ".lamprow"), classes(pg, ".lamprow .num")))
-    check("lamps: NRFI lamp is lit", pg.locator(".lr-nr .lamp.on").count() == 1 and pg.locator(".lamprow .lamp").count() == 1 and nr_lit)
-    check("lamps: no visible lamp note", "A lit lamp" not in pg.evaluate("document.body.innerText"))
-    check("lamps: hidden from screen readers", all(a == "true" for a in pg.eval_on_selector_all(".lamp", "els => els.map(e => e.getAttribute('aria-hidden'))")))
+    # result lamps: one per board market, graded on page.json's results
+    exp_l = lamps_expect(g)
+    check("lamps: WS5 picks worked out in the test", [x[:2] for x in exp_l] == [("Winner Brewers", "hit"), ("First 5 Brewers", "hit"), ("Total Over 6.5", "miss"), ("NRFI 55%", "hit")], exp_l)
+    check("lamps: WS5 labels, colours and screen-reader words", lamps(pg) == exp_l, (lamps(pg), exp_l))
+    check("lamps: NRFI number keeps its tier", classes(pg, ".lr-nr .num") == [f"num {BT(m['no_run_first'], 'nrfi')}"], classes(pg, ".lr-nr .num"))
+    cols = pg.evaluate("[...document.querySelectorAll('.lr .lamp')].map(l => getComputedStyle(l).backgroundColor)")
+    check("lamps: green #7CF0A6 when the pick came true, red #FF6B5E when it missed", cols == [HIT, HIT, MISS, HIT], cols)
+    check("lamps: green and red lamps glow", all("rgba" in pg.evaluate("e => getComputedStyle(e).boxShadow", el) for el in pg.query_selector_all(".lr .lamp")))
+    check("lamps: hidden from screen readers (the words carry the meaning)", all(a == "true" for a in pg.eval_on_selector_all(".lamp", "els => els.map(e => e.getAttribute('aria-hidden'))")))
+    check("lamps: no lamp is yellow", not any("242, 193, 46" in s for s in pg.evaluate("[...document.querySelectorAll('.lamp')].map(l => getComputedStyle(l).backgroundColor + getComputedStyle(l).boxShadow)")))
 
     # ---------- home run conditions (dome) ----------
     check("conditions: heading, no park line, no separate Dome line", tc(pg, ".cond h2") == ["Home run conditions"] and pg.locator(".cond .subl, .cond .cond-note").count() == 0)
@@ -428,7 +547,12 @@ def test_real(browser, base):
     check("totals: no check marks (5 runs went over none of the lines)", pg.locator(".tot svg").count() == over == 0)
 
     # ---------- pitchers ----------
+    check("battery: heading on the replay", tc(pg, ".pitchers h2") == ["Battery"], tc(pg, ".pitchers h2"))
     check("pitchers: sub line", tc(pg, ".pitchers .subl") == ["Chance each starter reaches a strikeout total."], tc(pg, ".pitchers .subl"))
+    check("battery: no median or 'Threw' line", pg.locator(".pit .ks").count() == 0 and "Threw" not in pg.evaluate("document.querySelector('.pitchers').textContent"))
+    kou_ws5 = [KOU(g["starters"][s]["k_over"]) for s in ("away", "home")]
+    check("battery: WS5 strikeout lines worked out in the test (Misiorowski 6.5, Rasmussen 5.5, both 50/50)",
+          kou_ws5 == [["Strikeouts O/U 6.5", "Over 50%", "Under 50%"], ["Strikeouts O/U 5.5", "Over 50%", "Under 50%"]], kou_ws5)
     pits = pg.locator(".pit")
     check("pitchers: two blocks", pits.count() == 2)
     for i, side in enumerate(("away", "home")):
@@ -437,7 +561,7 @@ def test_real(browser, base):
         t = lambda sel: [norm(x) for x in blk.locator(sel).all_text_contents()]
         threw = res["starter_k"][side]
         check(f"pitchers {side}: team and name", t(".who") == [NICK[g[side + "_team"]]] and t(".nm") == [p["name"]], (t(".who"), t(".nm")))
-        check(f"pitchers {side}: median and thrown", t(".ks") == [f"Median {RUNS(p['median_k']).split()[0]} strikeouts. Threw {threw}."], t(".ks"))
+        check(f"battery {side}: strikeout O/U", t(".kou-l") + t(".kou-v > span") == KOU(p["k_over"]), (t(".kou-l") + t(".kou-v > span"), KOU(p["k_over"])))
         ks = sorted(p["k_over"], key=int)
         check(f"pitchers {side}: ladder labels", t(".rung .l") == [f"{k}+ K" for k in ks], t(".rung .l"))
         check(f"pitchers {side}: ladder values", t(".rung .v") == [PCT(p["k_over"][k]) for k in ks], t(".rung .v"))
@@ -451,7 +575,7 @@ def test_real(browser, base):
     check("pitchers: Rasmussen's 3+ and 4+ checked, nothing for Misiorowski", pits.nth(0).locator("svg").count() == 0 and pits.nth(1).locator("svg").count() == 2)
 
     # ---------- lineups: every cell, every chip class, every check ----------
-    check("lineups: sub line without the check sentence", tc(pg, ".lineups .subl") == ["Chance of at least one hit, two total bases, a homer, an RBI and a steal."], tc(pg, ".lineups .subl"))
+    check("lineups: no sub line", pg.locator(".lineups .subl").count() == 0)
     by_id = {r["id"]: r for side in ("away", "home") for r in res["batters"][side]}
     tabs = pg.locator("table.t")
     check("lineups: two tables with a Result column", tabs.count() == 2 and tabs.nth(0).locator("thead th").count() == 8)
@@ -462,8 +586,8 @@ def test_real(browser, base):
     for i, side in enumerate(("away", "home")):
         rows = tabs.nth(i).locator("tbody tr")
         check(f"lineups {side}: nine rows", rows.count() == 9)
-        exp_rows, exp_checks[side] = lineup_expect(g, side, by_id)
-        ok_text, ok_cls, bad = True, True, []
+        exp_rows, exp_icons, exp_checks[side] = lineup_expect(g, side, by_id)
+        ok_text, ok_cls, ok_icons, bad = True, True, True, []
         for r, row in enumerate(g["lineups"][side]):
             cells = [norm(x) for x in rows.nth(r).locator("td").all_text_contents()]
             if cells != exp_rows[r]:
@@ -472,11 +596,25 @@ def test_real(browser, base):
             expc = [f"p {TIER(row[k], key)}" for k, key in (("hit", "hit"), ("tb2", "tb"), ("hr", "hr"), ("rbi", "rbi"), ("sb", "sb"))]
             if cls != expc:
                 ok_cls = False; bad.append((cls, expc))
-        check(f"lineups {side}: all cell text, checks and result lines", ok_text, bad[:2])
+            icons = rows.nth(r).locator("svg").evaluate_all("els => els.map(e => e.getAttribute('aria-label'))")
+            if icons != exp_icons[r]:
+                ok_icons = False; bad.append((row["name"], icons, exp_icons[r]))
+        check(f"lineups {side}: all cell text and result lines", ok_text, bad[:2])
         check(f"lineups {side}: all chip classes", ok_cls, bad[:2])
+        check(f"lineups {side}: a result icon, with its label, after every prop that came true", ok_icons, bad[:2])
         n = tabs.nth(i).locator("svg").count()
-        check(f"lineups {side}: check-mark count matches the box score", n == exp_checks[side], (n, exp_checks[side]))
-    check("lineups: WS5 has 13 Brewers checks and 6 Rays checks", (exp_checks["away"], exp_checks["home"]) == (13, 6), exp_checks)
+        check(f"lineups {side}: icon count matches the box score", n == exp_checks[side], (n, exp_checks[side]))
+    check("lineups: WS5 has 13 Brewers icons and 6 Rays icons, the same counts as the old checks", (exp_checks["away"], exp_checks["home"]) == (13, 6), exp_checks)
+    ic = pg.evaluate("""[...document.querySelectorAll('table.t svg')].map(s => { const c = getComputedStyle(s.querySelector('path, circle'));
+        return [s.getAttribute('role'), s.getAttribute('width'), s.getAttribute('height'), c.fill !== 'none' ? c.fill : c.stroke, s.closest('.ck') !== null, s.getAttribute('aria-hidden')]; })""")
+    check("lineups: icons are 14px #2E7A4F images with labels, in the check slot", ic and all(x == ["img", "14", "14", "rgb(46, 122, 79)", True, None] for x in ic), ic[:3])
+    bat = pg.evaluate("""(() => { const s = [...document.querySelectorAll('table.t svg')].find(x => x.getAttribute('aria-label') === 'got a hit'), p = s.querySelector('path'), c = getComputedStyle(p);
+        return [s.children.length, c.fill, c.stroke, p.getAttribute('transform')]; })()""")
+    check("lineups: the bat is one filled, tapered shape on the diagonal (not a stroked line)", bat == [1, "rgb(46, 122, 79)", "none", "translate(8 8) rotate(-45)"], bat)
+    kinds = sorted({l for side in ("away", "home") for row in lineup_expect(g, side, by_id)[1] for l in row})
+    shown = sorted(set(pg.evaluate("[...document.querySelectorAll('table.t svg')].map(s => s.getAttribute('aria-label'))")))
+    check("lineups: WS5 shows the icon kinds its box score calls for (no homers that night)", shown == kinds == sorted(set(ICON_LABEL.values()) - {"homered"}), (shown, kinds))
+    check("lineups: no 'happened' words left", "happened" not in pg.evaluate("document.querySelector('.lineups').textContent"))
     check("lineups: scroll regions are keyboard focusable and named", pg.locator(".scroll[tabindex='0'][role=region][aria-label]").count() == 2)
     check("lineups: rows at least 44px tall", pg.evaluate("[...document.querySelectorAll('table.t tbody tr')].every(r => r.getBoundingClientRect().height >= 44)"))
 
@@ -521,7 +659,9 @@ def test_real(browser, base):
     body = pg.evaluate("document.body.innerText")
     check("copy: no middle dots and no arrows", "·" not in body and not any(c in body for c in "→↗›»"))
     out = focus_outline(pg, ".links a[href='#bts']")
-    check("a11y: focus outline on green is 3px yellow", out == ["solid", "3px", YELLOW], out)
+    check("a11y: focus outline on green is 3px yellow (kept: it marks where you are)", out == ["solid", "3px", YELLOW], out)
+    check("nav: the current-page underline is white", css(pg, ".links a[aria-current]", "textDecorationColor") == WHITE, css(pg, ".links a[aria-current]", "textDecorationColor"))
+    check("replay: yellow only on strong numbers, the hot HR bar and focus rings", yellow_offenders(pg) == [], yellow_offenders(pg))
     out = focus_outline(pg, ".scroll")
     check("a11y: focus outline on the ground is 3px board green", out == ["solid", "3px", GREEN], out)
     check("a11y: nav links are at least 44px tall", pg.evaluate("[...document.querySelectorAll('.links a, .brand')].every(a => a.getBoundingClientRect().height >= 44)"))
@@ -583,7 +723,7 @@ def test_real(browser, base):
         check(f"line score {label}: empty plates and dashes, no error banner", ls_rows(pg) == LS(None, "MIL", "TB") and pg.locator("[role=alert]").count() == 0, ls_rows(pg))
         check(f"line score {label}: the rest of the page is unaffected",
               tc(pg, "h1") == [site_json["replay_title"]] and pg.locator(".bd .plate").count() == 6 and pg.locator("table.t tbody tr").count() == 18
-              and pg.locator(".bts li").count() == 5 and tc(pg, ".bd-where") == ["Tropicana Field, indoors. Wednesday, October 28, 2026."])
+              and pg.locator(".bts li").count() == 5 and tc(pg, ".bd-where") == ["Tropicana Field. Wednesday, October 28, 2026."])
         check(f"line score {label}: no page errors", not log["errors"], log["errors"])
         ctx.close()
 
@@ -592,7 +732,7 @@ def test_real(browser, base):
     pg, log = open_page(ctx, base, fixed="2026-11-18T21:00:00Z")  # 10 AM, Nov 19 in Auckland
     pg.wait_for_selector("h1")
     settle(pg)
-    check("timezone Auckland: game date on the board unchanged", tc(pg, ".bd-where") == ["Tropicana Field, indoors. Wednesday, October 28, 2026."], tc(pg, ".bd-where"))
+    check("timezone Auckland: game date on the board unchanged", tc(pg, ".bd-where") == ["Tropicana Field. Wednesday, October 28, 2026."], tc(pg, ".bd-where"))
     check("timezone Auckland: updated line in local time", tc(pg, ".upd")[0].startswith("Updated Nov 19, 2026"), tc(pg, ".upd"))
     check("timezone Auckland: countdown uses local date (125 days)", tc(pg, "#banner .dg") == ["1", "2", "5"] and pg.get_attribute("#banner .digits", "aria-label") == "125 days", tc(pg, "#banner .dg"))
     ctx.close()
@@ -645,6 +785,8 @@ def season_data():
                           "total_over": {"6.5": 0.66, "7.0": 0.6, "7.5": 0.55, "8.5": 0.45, "9.5": 0.31}})
     g2["starters"]["away"] = None
     g2["starters"]["home"]["first_inning"] = None
+    # a strikeout tie: 5+ at 0.55 and 6+ at 0.45 are equally far from 50%, so the higher line (5.5) wins
+    g2["starters"]["home"]["k_over"] = {"3": 0.9, "4": 0.75, "5": 0.55, "6": 0.45, "7": 0.2}
     # final, open air, with the file's own dew point and elevation (they win over the computed ones)
     g3 = mk(1003, "New York Yankees", "Boston Red Sox", "final", park="Fenway Park", roof="open",
             weather=dict(outdoor, dew_point_f=50.6, elevation_ft=5204),
@@ -655,6 +797,8 @@ def season_data():
     g3["results"]["run_in_first"] = True
     g3["results"]["led_after_5"] = "home"
     g3["results"]["away_score"], g3["results"]["home_score"] = 6, 5
+    # a homer, so the final shows all five result icons (WS5 had none)
+    g3["results"]["batters"]["away"][0].update({"hr": 1, "tb": 4})
     # Yankees lineup ids in g3 come from the Brewers copy; use the real names so picks can find them
     picks = [
         {"name": "Christian Yelich", "team": "New York Yankees", "opponent": "Boston Red Sox", "home": False, "hit": 0.9966, "game_id": 1001},
@@ -740,13 +884,17 @@ def test_season(browser):
         l1, v1 = OU(g1["markets"]["total_over"])
         check("season game 1: board numbers", board_plates(pg) == [[PCT(g1["markets"]["away_win"]), PCT(g1["markets"]["f5_away"]), v1[0]], [PCT(g1["markets"]["home_win"]), PCT(g1["markets"]["f5_home"]), v1[1]]], board_plates(pg))
         check("season game 1: O/U captions", tc(pg, ".bd .cap") == l1, tc(pg, ".bd .cap"))
-        check("season game 1: NRFI without a lamp before the game", tc(pg, ".lamprow") == [f"NRFI {PCT(g1['markets']['no_run_first'])}"] and pg.locator(".lamprow .lamp").count() == 0, tc(pg, ".lamprow"))
+        check("season: battery heading in season", tc(pg, ".pitchers h2") == ["Today's battery"], tc(pg, ".pitchers h2"))
+        check("season game 1: four unlit lamps before the game, no screen-reader verdict", lamps(pg) == lamps_expect(g1) and [s for _, s, _ in lamps(pg)] == ["unlit"] * 4, (lamps(pg), lamps_expect(g1)))
+        check("season game 1: unlit lamps are plate green with the seam ring", set(pg.evaluate("[...document.querySelectorAll('.lr .lamp')].map(l => getComputedStyle(l).backgroundColor + ' ' + getComputedStyle(l).boxShadow)")) == {f"{UNLIT} rgb(43, 91, 70) 0px 0px 0px 2px inset"}, pg.evaluate("[...document.querySelectorAll('.lr .lamp')].map(l => getComputedStyle(l).boxShadow)"))
         check("season game 1: dew point by Magnus is 47°F", DEW(61.4, 58) == 47)
         check("season game 1: Fenway's 6 m is 20 ft", FT(ELEV_M["BOS"]) == 20)
         wx = tc(pg, ".wx > div")
         check("season game 1: six readings, computed dew point and elevation", wx == readings(g1["weather"], "BOS"), (wx, readings(g1["weather"], "BOS")))
         check("season game 1: no pressure, wind note 13px muted under the wind", "Pressure" not in " ".join(wx) and tc(pg, ".wx .note") == ["Out to CF (7 mph)"] and css(pg, ".wx .note", "fontSize") == "13px" and css(pg, ".wx .note", "color") == "rgb(78, 95, 86)")
         check("season game 1: bar label without the heading's words, hot bar", tc(pg, ".hrbox .hrrow > *") == ["HR Friendly", "63 out of 100"] and pg.locator(".fill.hot").count() == 1, tc(pg, ".hrbox .hrrow > *"))
+        check("season game 1: the hot HR bar (63) stays yellow", css(pg, ".fill.hot", "backgroundColor") == YELLOW)
+        check("season game 1 (preview, hot bar): yellow only on strong numbers, the hot HR bar and focus rings", yellow_offenders(pg) == [], yellow_offenders(pg))
         check("season game 1: totals sub line without a result", tc(pg, ".totals .subl") == ["Chance the game goes over each line."])
         check("season game 1: lineup table has no Result column and no checks", pg.locator("table.t").first.locator("thead th").count() == 7 and pg.locator("table.t svg").count() == 0)
         g1_plates = board_plates(pg)
@@ -759,16 +907,23 @@ def test_season(browser):
         check("season game 2: focus stays on the button that was clicked", pg.evaluate("document.activeElement.getAttribute('data-id')") == "1002")
         check("season game 2: line score from the API", ls_rows(pg) == LS(live, "ATH", "SEA"), (ls_rows(pg), LS(live, "ATH", "SEA")))
         cur = pg.evaluate("(() => { const c = document.querySelectorAll('.ls .ip.cur'); if (c.length !== 1) return c.length; const td = c[0].closest('td'), tr = td.closest('tr'); const cs = getComputedStyle(c[0]); return [tr.querySelector('th').textContent, [...tr.querySelectorAll('td')].indexOf(td) + 1, cs.outlineStyle, cs.outlineWidth, cs.outlineColor]; })()")
-        check("season game 2: the half being played has a 2px yellow outline (ATH, 6th)", cur == ["ATH", 6, "solid", "2px", YELLOW], cur)
+        check("season game 2: the half being played has a 2px white outline (ATH, 6th)", cur == ["ATH", 6, "solid", "2px", WHITE], cur)
         check("season game 2: live line from the API, with a lit lamp", tc(pg, ".bd-live") == ["Live, top 6th, 1 out"] and pg.locator(".bd-live .lamp.on").count() == 1, tc(pg, ".bd-live"))
-        check("season game 2: top line gives the date for a live game", tc(pg, ".bd-where") == ["T-Mobile Park, indoors. Tuesday, April 14, 2026."], tc(pg, ".bd-where"))
+        check("season game 2: the live lamp is white with a glow", css(pg, ".bd-live .lamp", "backgroundColor") == WHITE and "rgba(244, 245, 240" in css(pg, ".bd-live .lamp", "boxShadow"), css(pg, ".bd-live .lamp", "boxShadow"))
+        check("season game 2: the pressed game button is outlined in white", css(pg, ".gm[aria-pressed=true]", "outlineColor") == WHITE)
+        check("season game 2: top line gives the date for a live game, no 'indoors'", tc(pg, ".bd-where") == ["T-Mobile Park. Tuesday, April 14, 2026."], tc(pg, ".bd-where"))
+        check("season game 2 (live): yellow only on strong numbers, the hot HR bar and focus rings", yellow_offenders(pg) == [], yellow_offenders(pg))
         l2, v2 = OU(g2["markets"]["total_over"])
         check("season game 2: O/U tie goes to the higher line (8.5, over 45, under 55)", l2 == ["Over 8.5", "Under 8.5"] and v2 == ["45%", "55%"] and tc(pg, ".bd .cap") == l2, (l2, v2, tc(pg, ".bd .cap")))
         check("season game 2: board numbers changed to game 2", board_plates(pg) != g1_plates and board_plates(pg) == [[PCT(0.4123), PCT(0.3041), v2[0]], [PCT(0.5877), PCT(0.5512), v2[1]]], board_plates(pg))
         check("season game 2: plate tiers follow the new numbers", classes(pg, ".bd tbody tr >> nth=1 >> .plate") == [f"plate {BT(0.5877, 'ml')}", f"plate {BT(0.5512, 'f5')}", "plate b-plain"], classes(pg, ".bd tbody tr >> nth=1 >> .plate"))
         teams = [tc(pg, ".bd th.team .nick"), tc(pg, ".bd th.team .pitch")]
         check("season game 2: starter not announced on the board", teams == [["Athletics", "Mariners"], ["Starter not announced", "Rasmussen pitching"]], teams)
-        check("season game 2: no lamps while live", pg.locator(".lamprow .lamp").count() == 0)
+        check("season game 2: unlit lamps while live (Mariners, Mariners, Under 8.5, NRFI)", lamps(pg) == lamps_expect(g2) and [s for _, s, _ in lamps(pg)] == ["unlit"] * 4
+              and [t for t, _, _ in lamps(pg)] == ["Winner Mariners", "First 5 Mariners", "Total Under 8.5", "NRFI 62%"], lamps(pg))
+        check("season game 2: strikeout tie goes to the higher line (5.5, over 45, under 55)",
+              KOU(g2["starters"]["home"]["k_over"]) == ["Strikeouts O/U 5.5", "Over 45%", "Under 55%"]
+              and tc(pg, ".pit .kou-l") + tc(pg, ".pit .kou-v > span") == KOU(g2["starters"]["home"]["k_over"]), tc(pg, ".pit .kou"))
         check("season game 2: forecast missing message under the new heading", tc(pg, ".cond h2") == ["Home run conditions"] and tc(pg, ".cond-note") == ["The forecast for this park was not available when the prediction ran."], tc(pg, ".cond-note"))
         pits = tc(pg, ".pit")
         check("season game 2: starter not announced + first-inning fallback", "Starter not announced" in pits[0] and tc(pg, ".fi-none") == ["First-inning record not shown (fewer than 5 starts)."] and pg.locator(".stats").count() == 0, pits)
@@ -785,7 +940,15 @@ def test_season(browser):
         l3, v3 = OU(g3["markets"]["total_over"])
         check("season game 3: O/U line 8.5 (0.52), over 52 and under 48", l3 == ["Over 8.5", "Under 8.5"] and v3 == ["52%", "48%"] and tc(pg, ".bd .cap") == l3 and [p[2] for p in board_plates(pg)] == v3, (l3, v3, board_plates(pg)))
         check("season game 3: no 'led after 5' caption any more", "led after 5" not in tc(pg, ".board"))
-        check("season game 3: NRFI lamp unlit (a run scored in the 1st)", pg.locator(".lr-nr .lamp").count() == 1 and pg.locator(".lr-nr .lamp.on").count() == 0 and "It happened" not in tc(pg, ".lr-nr")[0])
+        check("season game 3: lamps graded on page.json (Yankees won: green; Red Sox led after 5: red; 11 runs over 8.5: green; a run in the 1st: red)",
+              lamps(pg) == lamps_expect(g3) and [x[:2] for x in lamps(pg)] == [("Winner Yankees", "hit"), ("First 5 Yankees", "miss"), ("Total Over 8.5", "hit"), ("NRFI 55%", "miss")], lamps(pg))
+        by3 = {r["id"]: r for s in ("away", "home") for r in g3["results"]["batters"][s]}
+        icons3 = [l for s in ("away", "home") for row in lineup_expect(g3, s, by3)[1] for l in row]
+        shown3 = pg.evaluate("[...document.querySelectorAll('table.t svg')].map(s => s.getAttribute('aria-label'))")
+        check("season game 3: every result icon, in order, with all five kinds", shown3 == icons3 and set(shown3) == set(ICON_LABEL.values()), (shown3, icons3))
+        shapes = pg.evaluate("""Object.fromEntries([...document.querySelectorAll('table.t svg')].map(s => [s.getAttribute('aria-label'),
+            [...s.children].map(c => c.tagName + (c.getAttribute('d') || '')).join('|')]))""")
+        check("season game 3: the five icons are five different drawings", len(shapes) == 5 and len(set(shapes.values())) == 5, shapes)
         wx3 = tc(pg, ".wx > div")
         check("season game 3: the file's dew point and elevation win", wx3 == readings(g3["weather"], "BOS") and "Dew point51°F" in wx3 and "Elevation5,204 ft" in wx3, wx3)
         st3 = [[norm(x) for x in pg.locator(".pit").nth(i).locator(".stats > div").all_text_contents()] for i in range(2)]
@@ -845,6 +1008,30 @@ def test_season(browser):
         fx = fixture("linescore-final-x.json")
         check("X: the home team's 9th shows X", ls_rows(pg) == LS(fx, "NYY", "BOS") and ls_rows(pg)[1][1][8] == "X", ls_rows(pg))
         check("X: only one X", sum(c == "X" for r in ls_rows(pg) for c in r[1]) == 1)
+        ctx.close()
+
+        # every market exactly even (2,500 of 5,000 simulations): "even" labels and no lamps, on a final game
+        ev = copy.deepcopy(g3)
+        ev["markets"].update({"away_win": 0.5, "home_win": 0.5, "f5_away": 0.4, "f5_home": 0.4, "f5_tie": 0.2, "no_run_first": 0.5,
+                              "total_over": {"6.5": 0.7, "7.5": 0.5, "8.5": 0.3}})
+        ctx, pg, _ = one(ev, "linescore-final-x.json")
+        check("even: worked out in the test", [t for t, _ in PICKS(ev)] == ["Winner even", "First 5 even", "Total 7.5 even", "NRFI 50%"] and all(s is None for _, s in PICKS(ev)), PICKS(ev))
+        check("even: 'Winner even', 'First 5 even', 'Total 7.5 even', 'NRFI 50%', no lamps", lamps(pg) == lamps_expect(ev) and pg.locator(".lr .lamp").count() == 0, lamps(pg))
+        ctx.close()
+        # a three-way tie for the top First 5 outcome, and a home-team pick on a live game
+        ev2 = copy.deepcopy(g2)
+        ev2["markets"].update({"f5_away": 0.3, "f5_home": 0.3, "f5_tie": 0.3})
+        ctx, pg, _ = one(ev2, "linescore-live.json")
+        check("even: a tie for the top First 5 outcome has no pick and no lamp; the others stay unlit", lamps(pg) == lamps_expect(ev2) and lamps(pg)[1] == ("First 5 even", None, ""), lamps(pg))
+        ctx.close()
+        # YRFI pick, a tie pick for First 5, and unknown results (null score and total) on a final
+        yr = copy.deepcopy(g3)
+        yr["markets"].update({"no_run_first": 0.45, "f5_away": 0.3, "f5_home": 0.3, "f5_tie": 0.4})
+        yr["results"].update({"away_score": None, "total_runs": None, "led_after_5": "tie", "run_in_first": True})
+        ctx, pg, _ = one(yr, "linescore-final-x.json")
+        check("YRFI: worked out in the test", PICKS(yr) == [("Winner Yankees", None), ("First 5 Tie", "hit"), ("Total Over 8.5", None), ("YRFI 55%", "hit")], PICKS(yr))
+        check("YRFI and unknowns: 'YRFI 55%' green, 'First 5 Tie' green, no lamp where the result is null", lamps(pg) == lamps_expect(yr), (lamps(pg), lamps_expect(yr)))
+        check("YRFI: its number has no tier colour", classes(pg, ".lr-nr .num") == ["num b-plain"], classes(pg, ".lr-nr .num"))
         ctx.close()
 
         # a failed fetch for a live game keeps page.json's top line
