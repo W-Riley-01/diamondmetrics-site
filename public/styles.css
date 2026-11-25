@@ -176,8 +176,8 @@ h1 + .upd { margin-top: 14px; }
 /* the battery under each team name: SP and C labels in label grey, names in white */
 .bl { display: block; font-size: 14px; font-weight: 400; line-height: 1.35; color: var(--white); white-space: nowrap; }
 .bl-sp { margin-top: 6px; }
-/* the standing and the battery's record are sentences: they wrap, in label grey */
-.bl-st, .bl-bat { white-space: normal; color: var(--label); max-width: 300px; }
+/* the standing (two short lines) and the battery's record, in label grey; they wrap only when the screen is too narrow */
+.bl-st, .bl-dr, .bl-bat { white-space: normal; color: var(--label); }
 .bl-st { margin-top: 6px; }
 .bl .pos { display: inline-block; min-width: 22px; color: var(--label); }
 
@@ -236,20 +236,18 @@ h1 + .upd { margin-top: 14px; }
 .pit .who { font-size: 14px; color: var(--muted); }
 .pit .nm { margin-top: 2px; font-family: var(--display); font-weight: 700; font-size: 32px; line-height: 1.05; }
 .started { margin-top: 10px; font-size: 13px; color: var(--muted); }
-.kou { margin-top: 10px; }
-.kou-l { font-size: 13px; font-weight: 600; color: var(--muted); }
-.kou-v { margin-top: 2px; display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 15px; }
-.kou-v b { font-size: 17px; font-weight: 700; }
 .pline { margin-top: 10px; }
 .rg { margin-top: 12px; }
-.rg-l { font-size: 13px; font-weight: 600; color: var(--muted); }
-.rg-row { margin-top: 2px; font-size: 15px; }
+.rg-row + .rg-row { margin-top: 2px; }
+.rg-row { font-size: 15px; }
 .rg-name { font-weight: 600; }
 .ladder { margin-top: 12px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
 .rung { text-align: center; }
 .rung .l { font-size: 13px; color: var(--muted); }
 .rung .v { margin-top: 4px; }
 .rung .ck { width: auto; height: 18px; margin-top: 2px; justify-content: center; display: flex; }
+/* a K under each strikeout total the starter reached, where a check mark sat */
+.kmark { font-family: var(--display); font-weight: 800; font-size: 18px; line-height: 1; color: var(--ok); }
 .fi { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--rule); }
 .fi-l { margin-bottom: 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .fi-none { margin-top: 12px; font-size: 14px; line-height: 1.5; color: var(--muted); }
@@ -299,6 +297,12 @@ footer .wrap { padding-top: 28px; padding-bottom: 28px; display: flex; flex-wrap
 
 @media (prefers-reduced-motion: no-preference) {
   .gm, .links a, a { transition: background-color .15s ease, color .15s ease; }
+  /* the homer burst pops once, the first time it is drawn (app.js adds .pop only then) */
+  .ico.pop { transform-origin: 50% 50%; animation: burst-pop 500ms ease-out 1 both; }
+}
+@keyframes burst-pop {
+  from { transform: scale(.6); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
 }
 
 /* ---------- in between ---------- */
@@ -341,7 +345,6 @@ footer .wrap { padding-top: 28px; padding-bottom: 28px; display: flex; flex-wrap
   .bd td::before { content: attr(data-label); display: block; margin-bottom: 4px; font-size: 12px; color: var(--label); white-space: nowrap; }
   .nick { font-size: 38px; }
   .rec { font-size: 22px; }
-  .bl-st, .bl-bat { max-width: none; }
   .plate { font-size: 38px; padding: 6px 8px 4px; }
   .plate .pc { font-size: 19px; }
   .cap { font-size: 12px; }

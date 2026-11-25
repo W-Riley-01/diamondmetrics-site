@@ -83,9 +83,9 @@
   }
 
   // A small icon on a 16-unit grid, drawn in currentColor (the slot sets the colour). label null: decorative.
-  function svgIcon(shapes, size, label) {
+  function svgIcon(shapes, size, label, extraClass) {
     const s = document.createElementNS(SVGNS, 'svg');
-    for (const [k, v] of [['viewBox', '0 0 16 16'], ['width', size], ['height', size], ['focusable', 'false'], ['class', 'ico']]) s.setAttribute(k, String(v));
+    for (const [k, v] of [['viewBox', '0 0 16 16'], ['width', size], ['height', size], ['focusable', 'false'], ['class', 'ico' + (extraClass ? ' ' + extraClass : '')]]) s.setAttribute(k, String(v));
     if (label) { s.setAttribute('role', 'img'); s.setAttribute('aria-label', label); } else s.setAttribute('aria-hidden', 'true');
     for (const [tag, attrs] of shapes) {
       const el = document.createElementNS(SVGNS, tag);
@@ -97,26 +97,35 @@
   }
 
   const CHECK = [['path', { d: 'M3 8.5l3.2 3.2L13 4.5', 'stroke-width': '2.4' }]];
+  // A filled bat laid on the diagonal: knob, thin handle, tapering out to a rounded barrel.
+  const BAT = [['path', {
+    d: 'M-5.7-.75H-1C2-.75 3-2.5 5.5-2.5A2.5 2.5 0 0 1 5.5 2.5C3 2.5 2 .75-1 .75H-5.7A1.5 1.5 0 1 1-5.7-.75z',
+    transform: 'translate(8 8) rotate(-45)', fill: 'currentColor', stroke: 'none',
+  }]];
+  // A firework burst: a small centre dot inside an empty ring, and ten rays radiating out from the ring, alternating
+  // long and short. (Rays meeting in the middle read as an asterisk; six even arms read as a snowflake.)
+  const BURST = [
+    ['circle', { cx: '8', cy: '8', r: '1.2', fill: 'currentColor', stroke: 'none' }],
+    ['path', { d: 'M8 4.6V1M11.23 6.95L14.66 5.84M10 10.75L12.11 13.66M6 10.75L3.89 13.66M4.77 6.95L1.34 5.84', 'stroke-width': '1.4' }],
+    ['path', { d: 'M10.29 4.84L11.29 3.47M11.71 9.21L13.33 9.73M8 11.9V13.6M4.29 9.21L2.67 9.73M5.71 4.84L4.71 3.47', 'stroke-width': '1.4' }],
+  ];
   // Lineup result icons, one per batter prop.
   const ICONS = {
-    // A filled bat laid on the diagonal: knob, thin handle, tapering out to a rounded barrel.
-    hit: {
-      label: 'got a hit',
-      shapes: [['path', {
-        d: 'M-5.7-.75H-1C2-.75 3-2.5 5.5-2.5A2.5 2.5 0 0 1 5.5 2.5C3 2.5 2 .75-1 .75H-5.7A1.5 1.5 0 1 1-5.7-.75z',
-        transform: 'translate(8 8) rotate(-45)', fill: 'currentColor', stroke: 'none',
-      }]],
-    },
-    tb: { label: 'two or more bases', shapes: [['path', { d: 'M3 8.5l3.2 3.2L13 4.5', 'stroke-width': '2.2' }]] },
-    hr: { label: 'homered', shapes: [['circle', { cx: '8', cy: '8', r: '5.8' }], ['path', { d: 'M4.8 3.6c1.5 1.3 2.2 2.7 2.2 4.4s-.7 3.1-2.2 4.4', 'stroke-width': '1.2' }], ['path', { d: 'M11.2 3.6C9.7 4.9 9 6.3 9 8s.7 3.1 2.2 4.4', 'stroke-width': '1.2' }]] },
+    hit: { label: 'got a hit', shapes: BAT },
+    tb: { label: 'two or more bases', shapes: BAT },
+    hr: { label: 'homered', shapes: BURST },
     rbi: { label: 'drove in a run', shapes: [['path', { d: 'M3 2.8h10v6L8 13.4 3 8.8z' }]] },
     sb: { label: 'stole a base', shapes: [['path', { d: 'M8 2.4L13.6 8 8 13.6 2.4 8z' }]] },
   };
 
   // A check mark with words for screen readers, in a fixed-width slot so numbers stay aligned.
   const mark = (yes, words) => h('span', { class: 'ck' }, yes ? [svgIcon(CHECK, 16, null), h('span', { class: 'sr' }, ' ' + words)] : null);
-  // A lineup result icon in the same slot; the icon itself carries the words.
-  const propMark = (yes, kind) => h('span', { class: 'ck' }, yes ? svgIcon(ICONS[kind].shapes, 14, ICONS[kind].label) : null);
+  // A lineup result icon in the same slot; the icon itself carries the words. pop: the one-time burst animation.
+  const propMark = (yes, kind, pop) => h('span', { class: 'ck' }, yes ? svgIcon(ICONS[kind].shapes, 14, ICONS[kind].label, pop ? 'pop' : null) : null);
+  // A K under each strikeout total the starter reached, in the same slot; screen readers get the full sentence.
+  const kMark = (yes, n) => h('span', { class: 'ck' }, yes ? [h('span', { class: 'kmark', 'aria-hidden': 'true' }, 'K'), h('span', { class: 'sr' }, 'Reached ' + n + ' strikeouts.')] : null);
+  // Homer bursts already shown, by game, side and player: the pop plays once, never again for the same burst.
+  const popped = new Set();
 
   // A board lamp. Decorative: the text next to it carries the meaning. state: '' (unlit), 'on' (live), 'hit' or 'miss'.
   const lamp = (state) => h('span', { class: 'lamp' + (state ? ' ' + state : ''), 'aria-hidden': 'true' });
@@ -306,9 +315,8 @@
     }
     return best;
   }
-  // Total runs: the .5 keys of markets.total_over. Strikeouts: k_over[n] is n or more, the over on line n - 0.5.
+  // Total runs: the .5 keys of markets.total_over.
   const ouLine = (over) => closestLine(over, (k) => (k.endsWith('.5') ? Number(k) : null));
-  const kLine = (over) => closestLine(over, (k) => (/^\d+$/.test(k) ? Number(k) - 0.5 : null));
 
   // Dew point in whole °F: the file's value, or Magnus from temperature and humidity (the engine's constants 6.1078, 7.5, 237.3).
   function dewPointF(w) {
@@ -406,20 +414,19 @@
   // "14 games", "4.5 games", "1 game".
   const gamesText = (n) => String(n) + (n === 1 ? ' game' : ' games');
 
-  // "1st in the NL Central, 14 games up. 35–17 in the division." / "3rd in the AL East, 11 games back. ..." /
-  // "Tied for 1st in the NL West. ..." / "Tied for 3rd in the AL East, 2 games back. ..."
-  function standingLine(t) {
-    if (!t || !ok(t.place) || typeof t.division !== 'string') return null;
+  // The standing as two lines, so neither breaks mid-phrase: ["1st in the NL Central, 14 games up.", "35–17 in the
+  // division."], or ["3rd in the AL East, 11 games back.", ...], ["Tied for 1st in the NL West.", ...],
+  // ["Tied for 3rd in the AL East, 2 games back.", ...]. The second is null when the division record is missing.
+  function standingLines(t) {
+    if (!t || !ok(t.place) || typeof t.division !== 'string') return [null, null];
     let s = (t.tied ? 'Tied for ' : '') + ordinal(t.place) + ' in the ' + t.division;
     if (t.place === 1 && !t.tied && ok(t.lead) && t.lead > 0) s += ', ' + gamesText(t.lead) + ' up';
     else if (t.place > 1 && ok(t.gamesBack)) s += ', ' + gamesText(t.gamesBack) + ' back';
-    s += '.';
     const dr = t.divisionRecord;
-    if (dr && ok(dr.w) && ok(dr.l)) s += ' ' + dr.w + '–' + dr.l + ' in the division.';
-    return s;
+    return [s + '.', dr && ok(dr.w) && ok(dr.l) ? dr.w + '–' + dr.l + ' in the division.' : null];
   }
 
-  // A Running game row's numbers: pitcher "2 stolen, 1 caught, 0 pickoffs"; catcher "48 stolen, 25 caught, 34%" or
+  // A stolen-base row's numbers: pitcher "2 stolen, 1 caught, 0 pickoffs"; catcher "48 stolen, 25 caught, 34%" or
   // "no attempts"; "(2 teams)" when the season total covers more than one team.
   function runningText(p, kind) {
     if (!p || !ok(p.sb) || !ok(p.cs)) return 'no stats yet';
@@ -548,6 +555,7 @@
       slots[side] = {
         rec: h('span', { class: 'rec', hidden: true }),
         stand: h('span', { class: 'bl bl-st', hidden: true }),
+        divrec: h('span', { class: 'bl bl-dr', hidden: true }),
         catcher: h('span', { class: 'bl bl-c' }, bline('C', 'not announced')),
         bat: h('span', { class: 'bl bl-bat', hidden: true }),
       };
@@ -560,6 +568,7 @@
         h('th', { scope: 'row', class: 'team' },
           h('span', { class: 'nameline' }, h('span', { class: 'nick' }, nick(team)), slots[side].rec),
           slots[side].stand,
+          slots[side].divrec,
           h('span', { class: 'bl bl-sp' }, bline('SP', st && st.name ? st.name : 'not announced')),
           slots[side].catcher,
           slots[side].bat),
@@ -616,9 +625,11 @@
         const rec = t && ok(t.wins) && ok(t.losses) ? t.wins + '–' + t.losses : null;
         slots[side].rec.replaceChildren(rec || '');
         slots[side].rec.hidden = !rec;
-        const line = standingLine(t);
-        slots[side].stand.replaceChildren(line || '');
-        slots[side].stand.hidden = !line;
+        const [place, div] = standingLines(t);
+        slots[side].stand.replaceChildren(place || '');
+        slots[side].stand.hidden = !place;
+        slots[side].divrec.replaceChildren(div || '');
+        slots[side].divrec.hidden = !div;
       }
     };
     el.setBattery = (b) => {
@@ -723,25 +734,19 @@
     const res = finalResults(g);
     const threw = res && res.starter_k && ok(res.starter_k[side]) ? res.starter_k[side] : null;
     const lineSlot = h('div', { class: 'pline-slot' });
-    // Running game: stolen bases against the pitcher and the catcher this season (from /api/battery); hidden until then.
+    // Stolen bases against the pitcher and the catcher this season (from /api/battery); hidden until then.
     const running = h('div', { class: 'rg', hidden: true });
-    const kl = p ? kLine(p.k_over) : null;
     const ladder = p ? Object.keys(p.k_over || {}).sort((a, b) => Number(a) - Number(b)) : [];
     const f = p ? p.first_inning : null;
     const el = h('div', { class: 'pit' },
       h('div', { class: 'who' }, nick(team)),
       h('div', { class: 'nm' }, p && p.name ? p.name : 'Starter not announced'),
-      kl ? h('div', { class: 'kou' },
-        h('div', { class: 'kou-l' }, 'Strikeouts O/U ' + kl.line),
-        h('div', { class: 'kou-v' },
-          h('span', null, 'Over ', h('b', null, wholePct(kl.over))),
-          h('span', null, 'Under ', h('b', null, wholePct(100 - kl.over))))) : null,
       lineSlot,
       running,
       p ? h('div', { class: 'ladder' }, ladder.map((k) => h('div', { class: 'rung' },
         h('div', { class: 'l' }, k + '+ K'),
         h('div', { class: 'v' }, pcell(p.k_over[k], 'k' + k)),
-        mark(threw !== null && threw >= Number(k), 'reached')))) : null,
+        kMark(threw !== null && threw >= Number(k), Number(k))))) : null,
       !p ? null : f
         ? h('div', { class: 'fi' },
           h('div', { class: 'fi-l' }, 'First inning'),
@@ -756,7 +761,7 @@
       for (const [who, kind] of [[b && b.pitcher, 'pitcher'], [b && b.catcher, 'catcher']]) {
         if (who && typeof who.name === 'string') rows.push(h('p', { class: 'rg-row' }, h('span', { class: 'rg-name' }, who.name), ' ', runningText(who, kind)));
       }
-      running.replaceChildren(...(rows.length ? [h('div', { class: 'rg-l' }, 'Running game'), ...rows] : []));
+      running.replaceChildren(...rows);
       running.hidden = rows.length === 0;
     };
     el.setLine = (t, state) => {
@@ -780,7 +785,16 @@
     const fin = !!(res && res.batters);
     const byId = {};
     if (fin) for (const r of res.batters[side] || []) byId[r.id] = r;
-    const cell = (p, key, kind, yes) => h('td', null, h('span', { class: 'pv' }, pcell(p, key), fin ? propMark(yes, kind) : null));
+    // A homer burst pops the first time it's drawn for this game, side and player, and never again.
+    const cell = (p, key, kind, yes, who) => {
+      let pop = false;
+      if (yes && kind === 'hr') {
+        const id = g.game_id + '|' + side + '|' + who;
+        pop = !popped.has(id);
+        popped.add(id);
+      }
+      return h('td', null, h('span', { class: 'pv' }, pcell(p, key), fin ? propMark(yes, kind, pop) : null));
+    };
     const thead = h('thead', null, h('tr', null,
       h('th', { class: 'o', scope: 'col' }, '#'),
       h('th', { class: 'l', scope: 'col' }, 'Player'),
@@ -793,7 +807,7 @@
         h('td', { class: 'n' }, r.name),
         cell(r.hit, 'hit', 'hit', b && b.h >= 1),
         cell(r.tb2, 'tb', 'tb', b && b.tb >= 2),
-        cell(r.hr, 'hr', 'hr', b && b.hr >= 1),
+        cell(r.hr, 'hr', 'hr', b && b.hr >= 1, r.id),
         cell(r.rbi, 'rbi', 'rbi', b && b.rbi >= 1),
         cell(r.sb, 'sb', 'sb', b && b.sb >= 1),
         fin ? h('td', { class: 'rs' }, b ? b.line : '–') : null);
