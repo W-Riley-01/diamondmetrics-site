@@ -280,6 +280,27 @@ def pick_line(pick, games):
     return None
 
 
+SWEEP = sorted(set(range(360, 1441, 40)) | {853})
+
+# Every scroll wrapper: [class, scrollWidth, clientWidth, scrollHeight, clientHeight, the table's natural (unwrapped) width].
+WRAPPERS = """() => [...document.querySelectorAll('.ls-scroll, .scroll')].map(s => {
+    const t = s.querySelector('table'), keep = t.style.width;
+    t.style.width = 'min-content';
+    const natural = Math.ceil(t.getBoundingClientRect().width);
+    t.style.width = keep;
+    return [s.className, s.scrollWidth, s.clientWidth, s.scrollHeight, s.clientHeight, natural]; })"""
+
+
+def sweep(pg, label):
+    """At every width: no wrapper scrolls vertically, and none scrolls sideways when its table fits."""
+    for w in SWEEP:
+        pg.set_viewport_size({"width": w, "height": 900})
+        settle(pg, 120)
+        rows = pg.evaluate(WRAPPERS)
+        bad = [r for r in rows if r[3] > r[4] or (r[5] <= r[2] and r[1] > r[2])]
+        check(f"{label} {w}: no scroll wrapper overflows unless its table can't fit", rows and not bad and no_hscroll(pg), bad or rows)
+
+
 def plate_tops_aligned(pg):
     """Every model plate in a team row starts at the same height."""
     return pg.evaluate("""() => [...document.querySelectorAll('.bd tbody tr')].every(tr => {
@@ -512,6 +533,16 @@ def test_real(browser, base):
         plates_in = pg.evaluate("(() => { const b = document.querySelector('.board').getBoundingClientRect(); return [...document.querySelectorAll('.board .plate, .board .ip')].every(p => p.getBoundingClientRect().right <= b.right - 8); })()")
         check(f"board at {w}: every plate inside the board", plates_in)
         check(f"board at {w}: plates line up at the top", plate_tops_aligned(pg))
+    check("scrollbars: the browser runs with classic scrollbars that take up space, as on Windows",
+          pg.evaluate("innerWidth - document.documentElement.clientWidth") > 0, pg.evaluate("innerWidth - document.documentElement.clientWidth"))
+    pg.set_viewport_size({"width": 853, "height": 900})
+    settle(pg, 150)
+    w853 = pg.evaluate(WRAPPERS)
+    check("853 (the reported width): the line score has no vertical scroll and both lineups fit without a scrollbar",
+          all(r[3] <= r[4] and r[1] <= r[2] for r in w853), w853)
+    sweep(pg, "replay sweep")
+    pg.set_viewport_size({"width": 1440, "height": 900})
+    settle(pg, 150)
     pg.evaluate("document.activeElement.blur()")
     screenshot(pg, "replay-1440.png")
     ctx.close()
@@ -771,6 +802,11 @@ def test_season(browser):
             check(f"season {w}: no horizontal page scroll with the 11-inning line score", no_hscroll(pg), pg.evaluate("document.documentElement.scrollWidth"))
         sc = pg.evaluate("(() => { const s = document.querySelector('.ls-scroll'); return [s.scrollWidth > s.clientWidth, s.tabIndex, s.getAttribute('role'), s.getAttribute('aria-label')]; })()")
         check("season 390: extra innings scroll inside a focusable wrapper", sc == [True, 0, "region", "Line score"], sc)
+        sweep(pg, "11-inning sweep")
+        pg.set_viewport_size({"width": 1440, "height": 900})
+        pg.click(".gm >> nth=1")
+        settle(pg)
+        sweep(pg, "live sweep")
         pg.set_viewport_size({"width": 1440, "height": 900})
         pg.click(".gm >> nth=1")
         settle(pg)
@@ -964,7 +1000,8 @@ if __name__ == "__main__":
     srv = start_server(SITE, PORT_MAIN)
     try:
         with sync_playwright() as p:
-            b = p.chromium.launch()
+            # headless Chromium hides scrollbars by default; keep them, so the layout is what Windows users get
+            b = p.chromium.launch(ignore_default_args=["--hide-scrollbars"])
             test_real(b, f"http://127.0.0.1:{PORT_MAIN}/")
             test_season(b)
             test_errors(b)
