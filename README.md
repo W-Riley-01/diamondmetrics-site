@@ -1,25 +1,43 @@
-# diamondmetrics-site
+# Diamond Metrics
 
-The site for `app.diamondmetrics.dev`: MLB game predictions from a Monte Carlo simulation of each game (odds to win, first five innings, totals, starter strikeouts, lineups, player props, home run conditions, and a Beat the Streak top 5), with a live line score from the MLB Stats API.
+The site for `diamondmetrics.dev` (and `app.diamondmetrics.dev`): MLB game predictions from a Monte Carlo simulation of each game (odds to win, first five innings, totals, starter strikeouts, lineups, player props, home run conditions, and Beat the Streak picks), with live scores from the MLB Stats API.
 
-No build step. The `public/` folder is served as it is; one small Worker script answers `/api/*`.
+No build step and nothing from npm is served. The `public/` folder is served as it is; one small Worker script answers `/api/*` and serves the game pages.
+
+## Pages and URLs
+
+| URL | Page | Served by |
+|---|---|---|
+| `/` | Home: today's games as cards, and the top three Beat the Streak picks | `public/index.html` (assets) |
+| `/game/{gamePk}` | One game: the board, home run conditions, total runs, starting pitchers and lineups | the Worker, which serves `public/game.html` from the assets for a 1 to 8 digit id |
+| `/beat-the-streak` | Every Beat the Streak pick | `public/beat-the-streak.html` (assets) |
+| anything else | "Page not found." with a link to all games, status 404 | `public/404.html` (assets `not_found_handling: "404-page"`) |
+
+- `html_handling` is the default, `auto-trailing-slash`: `/beat-the-streak` serves `beat-the-streak.html`, and `/beat-the-streak.html` and `/beat-the-streak/` redirect (307) to it. `/index.html` redirects to `/`.
+- `run_worker_first` is `["/api/*", "/game", "/game/*"]`. The Worker answers `/game/{1-8 digits}` with `game.html` (fetched from the assets as `/game`) and every other `/game` path (`/game`, `/game/`, `/game/abc`, `/game/123456789`, `/game/1/x`) with the 404 page and status 404. `/game` is in the list so the bare page shell is never served on its own; `/game.html` redirects to `/game`, which is the 404 page. Other methods than GET and HEAD are 405.
+- A gamePk that is a number but isn't in `page.json` gets the game page, which says "This game isn't on today's slate." with a link to all games.
+- Every asset path is absolute (`/styles.css`, `/app.js`, `/fonts/…`, `/data/page.json`), since game pages are one level down.
+- Every page gets the same security headers from `public/_headers`, including the game pages and the 404 page the Worker returns (it returns the assets' own response, which carries the `_headers` rules; `tests/test_routes.py` checks this with `wrangler dev`).
 
 ```
 public/
-  index.html, styles.css, app.js   the page
+  index.html, game.html,           the four pages (each a small shell; app.js draws the content, picked by
+  beat-the-streak.html, 404.html   <body data-page="home|game|bts">; the 404 page has no script)
+  app.js, styles.css               one script and one stylesheet for every page
   _headers                         security headers and cache rules for the static files
   favicon.svg                      the brand mark: a white diamond with a yellow second base on board green
-  data/page.json                   the predictions the page shows
+  data/page.json                   the predictions the pages show
   data/site.json                   Opening Day countdown text and the replay title and headline
   fonts/                           Big Shoulders (display) and Libre Franklin (text), variable latin subsets
                                    from @fontsource-variable 5.3.0, SIL Open Font License, licences included
-worker/index.js                    the Worker: GET /api/linescore, /api/boxscore and /api/series/{gamePk}
+worker/index.js                    the Worker: the /api/* endpoints and the /game routes
 wrangler.jsonc                     Worker and static-assets config
 package.json, package-lock.json    wrangler, pinned (a dev tool only; nothing from npm is served)
 tests/
-  test_site.py, serve.py           browser tests (Playwright)
+  test_site.py, serve.py           browser tests (Playwright) and the test server that mimics the routing
+  test_routes.py                   routing tests against the real wrangler dev
   worker.test.mjs                  Worker tests (node --test)
-  fixtures/                        line-score fixtures, and one raw upstream response
+  fixtures/                        API fixtures, and raw upstream responses
   screens/                         screenshots the tests save (not committed)
 ```
 
@@ -27,25 +45,37 @@ tests/
 
 `public/data/page.json` holds the predictions. Right now it is the replay of World Series Game 5 from `analysis/out/site/ws5_page.json` in the `mlb-market-engine` repo, copied byte for byte. Its SHA-256 is `e19e9611202f8ed1d62d796491a403cd1ac2eb0cb5b4767bbd6872a22ca4b458`. Do not edit it by hand: it is the committed output of a frozen run, and the page label says so.
 
-In season the engine writes this file on a schedule and the page shows whatever is in it. The page reads these fields and nothing else:
+In season the engine writes this file on a schedule and the pages show whatever is in it. They read these fields and nothing else:
 
 - top level: `date`, `updated_at`, `note` (`"replay"` shows the replay title and notice), `label`, `games`, `beat_the_streak`
-- each game: `game_id` (the MLB `gamePk`, used for the line score), `away_team`, `home_team`, `start_time_utc`, `park`, `roof`, `status` (`scheduled`, `live` or `final`), `away_score`, `home_score`, `inning`, `inning_half`, `outs`, `markets`, `weather` (may be `null`), `starters` (each side may be `null`), `lineups`, `results` (final games only)
+- each game: `game_id` (the MLB `gamePk`: the game page's URL and the key for the live data), `away_team`, `home_team`, `start_time_utc`, `park`, `roof`, `status` (`scheduled`, `live` or `final`), `away_score`, `home_score`, `inning`, `inning_half`, `outs`, `markets`, `weather` (may be `null`), `starters` (each side may be `null`), `lineups`, `results` (final games only)
 - `markets`: `away_win`, `home_win`, `f5_away`, `f5_home`, `f5_tie`, `total_over` (line -> chance of going over), `no_run_first`
 - `weather`: `temp_f`, `humidity_pct`, `wind_mph`, `wind_from`, `wind_label`, `carry_ft`, `hr_score`, `hr_label`, and optionally `dew_point_f` and `elevation_ft`
 - each starter: `name`, `k_over` (n -> chance of n or more strikeouts), `first_inning` (`scoreless`, `not_scoreless`, `era`, `opp_obp`, and optionally `whip`)
 - `results`: `away_score`, `home_score`, `total_runs`, `led_after_5` (`away`, `home` or `tie`), `run_in_first`, `starter_k`, and `batters`: per side, `id`, `h`, `tb`, `hr`, `rbi`, `sb` and the stat `line` (for example `1-4, 2B, RBI`). A `null` means the result isn't known.
-- each Beat the Streak pick: `name`, `team`, `hit`, and optionally `game_id` (use it on doubleheaders so the result is read from the right game)
+- each Beat the Streak pick, in ranked order: `name`, `team`, `hit`, and optionally `game_id` (use it on doubleheaders; without it the pick goes to his team's game, or on a doubleheader the final game he has a box-score row in)
 
 `public/data/site.json` is optional:
 
-- `opening_day` (YYYY-MM-DD) turns the countdown on until that date passes. `opening_label` and `opening_note` are its text. After the labor deal is settled, update all three.
-- `replay_title` is the page title while `note` is `"replay"` (without it the title is "MLB predictions"). In season the title is the long date of `date`.
-- `replay_headline` is the line under the replay title.
+- `opening_day` (YYYY-MM-DD) turns the home page's countdown on until that date passes. `opening_label` and `opening_note` are its text. After the labor deal is settled, update all three.
+- `replay_title` is the title while `note` is `"replay"` (without it the title is "MLB predictions"). `replay_headline` is the line under it.
 
 ## Live data (Worker)
 
-The line score, the starters' lines and catchers, and the season series come from the MLB Stats API, through same-origin endpoints so the page's Content-Security-Policy can stay `connect-src 'self'`. `worker/index.js` answers three endpoints, `GET` and `HEAD` only. Each returns only the trimmed JSON below; nothing from upstream is passed through as it is.
+Live data comes from the MLB Stats API through same-origin endpoints, so the pages' Content-Security-Policy can stay `connect-src 'self'`. `worker/index.js` answers six endpoints, `GET` and `HEAD` only. Each returns only the trimmed JSON below; nothing from upstream is passed through as it is.
+
+**`/api/slate/{date}`**: every game on a date, from `schedule?sportId=1&date={date}&hydrate=linescore`. `{date}` must be a real `YYYY-MM-DD` date (`2026-02-30` is a 400).
+
+```
+{"date":"2026-04-14",
+ "games":{"824853":{"state":"final","detail":"Final","inning":9,"half":"bottom","outs":3,
+                    "away":{"runs":4,"wins":10,"losses":8},"home":{"runs":2,"wins":9,"losses":9}}, ...}}
+```
+
+- `state` is `preview`, `live` or `final` (from `abstractGameState`), `detail` is `detailedState`. A rainout is `"Final"` upstream (abstractGameState `Final`, codedGameState `D`, detailedState `Postponed`; 823543, Rays at Yankees on 2026-05-23, rescheduled to 2026-09-22), so everything that reads the slate checks `detail` first: Postponed, Cancelled or Suspended is a stopped game, whatever `state` says.
+- `runs` comes from the line score (null before first pitch). `wins` and `losses` are `teams.{side}.leagueRecord`, for regular-season games (`gameType` `R`) only and `null` otherwise: in the postseason `leagueRecord` is the series record (4–1 on WS5). For a postponed game listed on its original date, the API's record is the one for the rescheduled game.
+- A gamePk listed twice on one date (a suspended game resumed the same day) keeps the entry that isn't stopped.
+- A date with no games is `{"date": …, "games": {}}`.
 
 **`/api/linescore/{gamePk}`**: the game's state and line score, from `schedule?sportId=1&hydrate=linescore&gamePk={gamePk}`.
 
@@ -55,7 +85,7 @@ The line score, the starters' lines and catchers, and the season series come fro
  "away":{"r":4,"h":8,"e":2},"home":{"r":1,"h":4,"e":0}}
 ```
 
-`state` is `preview`, `live` or `final` (from `abstractGameState`); `detail` is `detailedState` (for example `In Progress`, `Postponed`, `Suspended: Rain`); `half` is `top`, `bottom`, `middle` or `end`. A half-inning not batted, or a missing total, is `null`.
+`half` is `top`, `bottom`, `middle` or `end`. A half-inning not batted, or a missing total, is `null`.
 
 **`/api/boxscore/{gamePk}`**: each team's starting pitcher with his line, and its starting catcher, from `game/{gamePk}/boxscore` (plus the schedule call for the game's state, because the boxscore has none and answers 200 even for unknown games).
 
@@ -66,9 +96,9 @@ The line score, the starters' lines and catchers, and the season series come fro
  "home":{...}}
 ```
 
-The starting pitcher is the first id in the team's `pitchers` list; the line is `inningsPitched`, `hits`, `baseOnBalls`, `strikeOuts` (IP as the API gives it, a string such as `"5.1"`). The starting catcher is the starter in the batting order (code `n00`; substitutes have codes like `701`) whose first position was C. Either is `null` until known.
+The starting pitcher is the first id in the team's `pitchers` list; the line is `inningsPitched`, `hits`, `baseOnBalls`, `strikeOuts`. The starting catcher is the starter in the batting order (code `n00`; substitutes have codes like `701`) whose first position was C. Either is `null` until known.
 
-**`/api/series/{gamePk}`**: the regular-season series between the two teams and, for a postseason game, the postseason series. From `schedule?sportId=1&hydrate=seriesStatus&gamePk={gamePk}` (season, game type, start time, team ids and the postseason status), then `schedule?sportId=1&season={season}&gameType=R&teamId={away}&opponentId={home}`.
+**`/api/series/{gamePk}`**: the regular-season series between the two teams and, for a postseason game, the postseason series. From `schedule?sportId=1&hydrate=seriesStatus&gamePk={gamePk}`, then `schedule?sportId=1&season={season}&gameType=R&teamId={away}&opponentId={home}`.
 
 ```
 {"season":2026,
@@ -78,11 +108,11 @@ The starting pitcher is the first id in the team's `pitchers` list; the line is 
  "postseason":{"description":"World Series","result":{"leader":"away","wins":4,"losses":1,"over":true}}}
 ```
 
-- Counting is by start time (`gameDate`, UTC), so doubleheaders come out right. `played`, the wins, `sweeps` and `seasonSweep` use only final games (with a winner) that started no later than this game, this game included once it is final. `left` is the rest of the season's meetings: each `gamePk` once (a rescheduled game appears under both dates), cancelled games left out.
-- A sweep is a series (grouped by `seriesGameNumber`) of 2 or more games, all played, all won by one team. `seasonSweep` is the side (`"away"` or `"home"`, relative to this game) that has won every game played, or `null`.
+- Counting is by start time (`gameDate`, UTC), so doubleheaders come out right. `played`, the wins, `sweeps` and `seasonSweep` use only final games (with a winner) that started no later than this game, this game included once it is final. `left` is the rest of the season's meetings: each `gamePk` once, cancelled games left out.
+- A sweep is a series (grouped by `seriesGameNumber`) of 2 or more games, all played, all won by one team. `seasonSweep` is the side that has won every game played, or `null`.
 - `postseason` is `null` for a regular-season game. `result.leader` is `null` while the series is tied.
 
-**`/api/standings/{gamePk}`**: each team's record and division standing going into the game. From the game (`schedule?…&hydrate=probablePitcher&gamePk=`) and `standings?leagueId=103,104&season={season}&standingsTypes=regularSeason&hydrate=division`, with `date=` the day before the game's date for a regular-season game (`date=` includes that day's games) and no date for a postseason game (the final regular-season table).
+**`/api/standings/{gamePk}`**: each team's record and division standing going into the game. From the game (`schedule?…&hydrate=probablePitcher&gamePk=`) and `standings?leagueId=103,104&season={season}&standingsTypes=regularSeason&hydrate=division`, with `date=` the day before the game's date for a regular-season game and no date for a postseason game (the final regular-season table).
 
 ```
 {"season":2026,"asOf":"final",
@@ -90,9 +120,9 @@ The starting pitcher is the first id in the team's `pitchers` list; the line is 
  "home":{...}}
 ```
 
-`place` comes from games back, not `divisionRank` (which never ties): 1 plus the number of teams with fewer games back, and equal games back is a tie. `lead` is set only for a sole division leader. A team not in the standings (before Opening Day) is `null`.
+`place` comes from games back, not `divisionRank` (which never ties). `lead` is set only for a sole division leader. A team not in the standings is `null`.
 
-**`/api/battery/{gamePk}`**: each team's battery, their record together this season, and stolen bases against each. The pitcher is the boxscore's first pitcher once the game has started, the probable pitcher before; the catcher follows the `/api/boxscore` rule (`null` until the lineup is posted). Then each player's game log (`people/{id}/stats?stats=gameLog&group=pitching|fielding&season={season}&gameType=R,F,D,L,W`, so postseason games count too) and one call for all four players' season stats (`people?personIds=…&hydrate=stats(group=[pitching,fielding],type=[season],season={season})`).
+**`/api/battery/{gamePk}`**: each team's battery, their record together this season, and stolen bases against each. The pitcher is the boxscore's first pitcher once the game has started, the probable pitcher before; the catcher follows the `/api/boxscore` rule. Then each player's game log (`people/{id}/stats?stats=gameLog&group=pitching|fielding&season={season}&gameType=R,F,D,L,W`) and one call for all four players' season stats (`people?personIds=…&hydrate=stats(group=[pitching,fielding],type=[season],season={season})`).
 
 ```
 {"season":2026,
@@ -102,30 +132,31 @@ The starting pitcher is the first id in the team's `pitchers` list; the line is 
  "home":{...}}
 ```
 
-- A start together is the same `gamePk` where the pitcher's split is a start, the catcher's split is a start at C (a DH start, or coming on as a substitute, doesn't count), and both splits are for the same team. The date is never used to pair them (a doubleheader where one starts game 1 and the other game 2 doesn't count); it's only used for "before this game": an earlier date, or the same date with a lower game number. Wins and losses are the team's result (`isWin`).
+- A start together is the same `gamePk` where the pitcher's split is a start, the catcher's split is a start at C, and both splits are for the same team. The date is only used for "before this game": an earlier date, or the same date with a lower game number. Wins and losses are the team's result (`isWin`).
 - Stolen bases are this regular season's: for a player who played for more than one team, the season total (`teams` says how many). The catcher's come from his C split only.
 - No catcher yet: `catcher` and `together` are `null`.
 
-**Rules for all five**
+**Rules for all six**
 
-- `gamePk` must be 1 to 8 digits (400 otherwise). A game the API doesn't know is 404. An upstream error, bad JSON or no answer within 5 seconds (each upstream call) is 502. Other methods are 405. Other `/api/*` paths are 404.
+- `gamePk` must be 1 to 8 digits, the date a real `YYYY-MM-DD` (400 otherwise). A game the API doesn't know is 404. An upstream error, bad JSON or no answer within 5 seconds (each upstream call) is 502. Other methods are 405. Other `/api/*` paths are 404.
 - Caching uses the Cache API:
 
   | Endpoint | Edge keeps | Browser `max-age` |
   |---|---|---|
+  | `/api/slate` | 15 s while any game is live; 24 h once every game is over (final, postponed, cancelled or suspended); otherwise (and a date with no games) 5 min | 10; 86400; 300 |
   | `/api/linescore`, `/api/boxscore` | final 24 h, live 15 s, preview 5 min | 86400, 10, 300 |
   | `/api/series` | 1 h; 24 h once the teams have no meetings left | 3600; 86400 |
   | `/api/standings` | 1 h for a regular-season game; 24 h for a postseason game | 3600; 86400 |
   | `/api/battery` | 1 h; 24 h once the game is final | 3600; 86400 |
 
-  The browser gets its own `max-age` again when the answer comes from the edge cache (stored with the copy as `X-Browser-Max-Age`; copies stored before that header existed get the lifetime for their game state). Errors are `no-store` and not cached.
-- Worker responses don't get `_headers`, so the Worker sets its own: `Content-Type: application/json; charset=utf-8`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'`, `Referrer-Policy: strict-origin-when-cross-origin`.
+  The browser gets its own `max-age` again when the answer comes from the edge cache (stored with the copy as `X-Browser-Max-Age`). Errors are `no-store` and not cached.
+- The API's JSON responses set their own headers: `Content-Type: application/json; charset=utf-8`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'`, `Referrer-Policy: strict-origin-when-cross-origin`.
 
-**How the page uses them**
+**How the pages use them**
 
-When a game's board renders, the page fetches all five (so the catcher shows even hours before first pitch). The series and the standings are fetched once per game; the battery again only when the boxscore's starters or catchers change (a lineup posted after the page opened). After that one timer refreshes the line score and the boxscore together: every 30 seconds while the API says the game is live, and every 5 minutes from 15 minutes before `start_time_utc`, so a preview game goes live without a reload. Nothing is fetched while the tab is hidden (it refreshes as soon as the tab is visible again), and the timer stops when the game is final, when `detail` starts with Postponed, Cancelled or Suspended, or when another game is picked. The series is fetched once per game. The out-of-town board uses page.json only.
-
-If an endpoint can't be fetched (an error, or no answer within 10 seconds), its part stays empty and nothing else changes: empty plates and dashes and page.json's top line for the line score, "C not announced" and no starter's line for the boxscore, no strip for the series, no record or standings lines for the standings, no battery record or stolen-base rows for the battery. None of them grade the model: the result lamps and icons use page.json only, and page.json stays the source for the starters' names and every prediction.
+- Home: `/api/slate/{date of page.json}` on load, then every 30 seconds while any game in `page.json` is live or within 15 minutes of first pitch, on one timer. With nothing that close, it wakes when the next game's 15-minute window opens; with every game over, it stops. Nothing is fetched while the tab is hidden (it refreshes as soon as the tab is visible again). Only games in `page.json` are updated; other games on the slate are ignored. A failed fetch leaves the cards as `page.json` describes them.
+- Game page: the game's five endpoints when the page opens (so the catcher shows even hours before first pitch). The series and the standings once; the battery again only when the boxscore's starters or catchers change. One timer refreshes the line score and the boxscore together: every 30 seconds while the API says the game is live, every 5 minutes from 15 minutes before `start_time_utc`, nothing while the tab is hidden, and it stops when the game is final or its `detail` starts with Postponed, Cancelled or Suspended. The slate is fetched once (no polling) for the Other games list.
+- If an endpoint can't be fetched (an error, or no answer within 10 seconds), its part stays as `page.json` has it and nothing else changes. None of them grade the model: the result lamps and icons use `page.json` only, and `page.json` stays the source for the starters' names and every prediction.
 
 ## Preview on your computer
 
@@ -134,39 +165,56 @@ npm ci
 npx wrangler dev
 ```
 
-Then open http://localhost:8787. This serves `public/` and runs the Worker for `/api/*`, as in production. (`python -m http.server 8000 --directory public` still works for the page alone, without the line score.)
+Then open http://localhost:8787. This serves `public/` and runs the Worker for `/api/*` and `/game/*`, as in production.
 
 ## Deploy (Cloudflare Workers, static assets)
 
-The site runs on Cloudflare Workers with static assets, not Pages. The Worker `diamondmetrics-site` is connected to this repo's `main` branch; each push to `main` deploys. `wrangler.jsonc` sets the Worker script, the `public/` assets with `run_worker_first: ["/api/*"]` (static files never run the script), and keeps `workers_dev` and `preview_urls` off; the custom domains are set in the dashboard, not in the config. The build installs the pinned wrangler from `package-lock.json` (Workers Builds installs dependencies automatically; don't set the `SKIP_DEPENDENCY_INSTALL` build variable) and deploys with `npx wrangler deploy`. Static files get their headers from `public/_headers`.
+The site runs on Cloudflare Workers with static assets, not Pages. The Worker `diamondmetrics-site` is connected to this repo's `main` branch; each push to `main` deploys. `wrangler.jsonc` sets the Worker script, the `public/` assets with `run_worker_first: ["/api/*", "/game", "/game/*"]` and `not_found_handling: "404-page"`, and keeps `workers_dev` and `preview_urls` off; the custom domains are set in the dashboard, not in the config. The build installs the pinned wrangler from `package-lock.json` and deploys with `npx wrangler deploy`.
 
-## Rules the page follows
+## The pages
 
-- The strong and watch cut-offs are the ones from the original Streamlit app (listed under "Cut-off for every market", under Beat the Streak). A value is judged by the whole percent it shows, so a value of 17.54% that displays as 18% counts as 18%. The original compared the unrounded value and displayed one decimal.
-- Yellow means only "strong": yellow numerals on a green plate. On the board, strong numbers are yellow, worth-watching numbers white, and low numbers dim green (each plate carries the class `b-strong`, `b-watch` or `b-low`; plates with no cut-off, such as totals, are `b-plain`). In the tables, strong values are a yellow-on-green chip (`p-strong`), worth-watching values are dark ink (`p-watch`), and low values are dark brown (`p-low`). Selection markers are white: the half-inning being played on the line score, the pressed game on the out-of-town board, the current page in the nav, and the live lamp. Yellow appears in exactly four other places: the home-run bar at 55 or more (a strong home-run environment), keyboard focus rings on green areas (they mark where you are and need the contrast), the brand mark's second base, and the two foul poles. Yellow text never sits on the dirt. A test checks every element on the page against that list.
-- The infield: the page sides are grass (`--board`); the content column (`.infield`, max 1280px, from the nav to the footer) is infield dirt (`--dirt` #D9C3A0) with a 4px yellow foul pole down each edge, drawn with two inset box-shadows. The nav, the boards and the footer stay green. Section headings on the dirt are green bands with chalk (`--chalk` #FBF8F1) text and a 3px chalk bottom line; table header rules and the top rules of the starting pitcher blocks and the cut-offs are chalk; row rules are `--rule` (#EFE3CC); bars run in chalked lanes (`--track` #E8D9BE). Text on the dirt uses `--ink` (9.46:1), `--board` (5.85:1), `--muted` #4A3D2E (6.14:1) and `--low` #5A4936 (5.02:1); a test checks that every text on the dirt has at least 4.5:1.
-- The board's top line is the park and the date (or first pitch, or a stopped game's status), with a white lamp and "Live, bottom 5th, 2 outs" while the game is on.
-- The board starts with the line score: a plate per inning (at least nine, more for extra innings), then R, H and E behind a seam. Innings not played are empty plates; before the game R, H and E are dashes. In a final where the home team didn't bat in the last inning, that plate shows X. A postponed, cancelled or suspended game shows its status in the top line and its plates as the API gives them, with no X.
-- Under the line score, the season series strip (from `/api/series`): "Season series: Brewers 2–1" (leader first), "tied 1–1", or "first meeting"; a line for each series sweep ("Brewers swept a 3-game series, July 7–9."); for a season sweep "Brewers swept the season series 3–0.", or while games are left "Rays haven't beaten the Brewers this season (0–2, 1 game left)."; and for a postseason game "World Series: Brewers win 4–1." ("lead" while it's on, "tied 2–2" when level). The strip is hidden if the series can't be fetched.
-- Under a rule, the model numbers: Odds to win, First 5 winner and Total runs O/U, then the result lamps.
-- Total runs O/U is laid out the way a sportsbook lists a total: the away row shows the over and the home row the under, for the same line, with "Over 6.5" / "Under 6.5" as the caption under each plate. The line is the `.5` line in `markets.total_over` whose unrounded over chance is closest to 50%; on a tie, the higher line. The over shows its whole percent and the under shows 100 minus that, so the pair always adds to 100.
-- Result lamps, one per board market, show whether the model's pick came true. The pick is the likelier side on unrounded values:
-  - Winner: the team with the higher win chance ("Winner Brewers").
-  - First 5: the highest of away, home and tie ("First 5 Brewers" or "First 5 Tie").
-  - Total: Over or Under on the board's O/U line ("Total Over 6.5").
-  - NRFI: no run in the 1st when `no_run_first` is above 50% ("NRFI 55%", in its tier colour); otherwise YRFI with the other side of the number ("YRFI 55%", plain).
-  - Exactly even (a chance of 0.5, or a tie for the top First 5 outcome) is no pick: "Winner even", "First 5 even", "Total 6.5 even" or "NRFI 50%", with no lamp.
-  - Before and during the game the lamps are unlit. On a final game a lamp is green when the pick came true and red when it missed, with "Model's pick came true." / "Model's pick missed." for screen readers. If the result is `null` in page.json, that market has no lamp. Lamps are graded on page.json's `results` only, like the icons and checks below.
-- Each team on the board: the record beside the nickname ("Brewers 103–59"; it drops under the name when the column is narrow), the standing under it on two lines, so neither breaks mid-phrase at desktop width ("1st in the NL Central, 14 games up." then "35–17 in the division."; or "3rd in the AL East, 11 games back.", "Tied for 1st in the NL West.", "Tied for 3rd in the AL West, 2.5 games back."; the second line is left out when the division record is missing; on narrow screens the lines may wrap), then the battery: "SP" and the starter's name from page.json, "C" and the starting catcher from `/api/boxscore` ("C not announced" until the lineup is in), labels in #C9D6CE and names in #F4F5F0, and their record together ("Battery 20–7 this season", or "First start together this season"; no line while the catcher isn't known).
-- Starting pitchers (the section below Total runs): each team's starter by name, and once the game has started his line as four stat blocks (IP, H, BB, SO); if the API's starter isn't page.json's (an opener, a late scratch), a "Started: [name]" note sits above the line. Then stolen bases against the battery this season, one row each: the pitcher ("Jacob Misiorowski 2 stolen, 1 caught, 0 pickoffs") and the catcher ("William Contreras 48 stolen, 25 caught, 34%", caught-stealing % rounded half up, or "no attempts"), with "(2 teams)" when a season total covers more than one team. Then the 3+ to 7+ strikeout ladder (`k_over[n]` is the chance of n or more), with a bold K in `--ok` under each total the starter reached once the game is final ("Reached 4 strikeouts." for screen readers), and the first-inning record as stat blocks: NRFI record (scoreless-not scoreless), ERA, OBP, and WHIP when the data has it. With no first-inning data, a sentence says so.
-- Once a game is final, the lineup tables mark each batter prop that came true (read from `results.batters` by player id) with a 14px icon in `--ok` (#1A5E37, drawn in `currentColor`), each an image with words for screen readers: a bat (a filled shape, knob and thin handle out to a rounded barrel) for 1+ hit ("got a hit") and for 2+ total bases ("two or more bases"), a firework burst (a centre dot and ten rays of two lengths around it) for 1+ homer ("homered"), home plate for 1+ RBI ("drove in a run"), and a base for 1+ steal ("stole a base"). The burst pops once (about 500 ms, scaling up from 60% as it fades in) the first time it is drawn, never again for the same player and game, and not at all under `prefers-reduced-motion: reduce`. Check marks follow each total-runs line the game went over.
-- Home run conditions: the score bar's label is the tier (for example "Neutral (Dome)") and the score out of 100. An open-air park also shows temperature, humidity, dew point, wind (with `wind_label` under it), elevation and carry. Dew point is `dew_point_f` when present, otherwise Magnus from temperature and humidity with the engine's constants (6.1078, 7.5, 237.3), rounded to a whole °F. Elevation is `elevation_ft` when present, otherwise the home park's `elevation_m` from `STADIUM_INFO` in the engine's `weather.py`, converted to feet and rounded to the nearest 10. A park not in that table (right now the Athletics, code `ATH`) shows no elevation. When the engine's table changes, copy the new values into `ELEV_M` in `app.js`.
-- Beat the Streak shows each pick's team nickname and, once his game is final, his stat line for the night.
-- The line score and the model numbers are real tables with captions and row and column headers. On phones (560px and below) nine innings plus R, H and E fit at 390px; extra innings scroll inside the line score's own focusable box. Each model team becomes one block, and each plate gets its label from the cell's `data-label` through CSS. Scroll boxes only scroll sideways, and only when their table can't fit.
-- With more than one game, the out-of-town board lists them as buttons; the pressed one is shown on the main board and everything below it.
-- A probability that rounds to 0 shows as `<1%` and one that rounds to 100 shows as `>99%`.
-- The game date comes from `date` in the file and is not shifted by the viewer's time zone. First pitch and "Updated" are shown in the viewer's time zone.
-- Text is added to the page as text, never as HTML. `_headers` sets a strict Content-Security-Policy: no inline scripts, no inline styles, and no request to any other host. Do not add any of those, or the page will break. Bar widths are set through the CSSOM (`el.style.width`), which the policy allows.
+**Every page**: the nav has the brand "Diamond Metrics" (a link to `/`), "Games" (`/`) and "Beat the Streak" (`/beat-the-streak`), with `aria-current="page"` on the page you're on ("Games" on a game page, neither on the 404 page). Titles: "Diamond Metrics: MLB predictions" (home), "Brewers at Rays, October 28: Diamond Metrics" (a game; the static `og:title` of `game.html` is "MLB game: Diamond Metrics", since link previews don't run the script), "Beat the Streak: Diamond Metrics", "Page not found: Diamond Metrics".
+
+**Dates**: the game date comes from `date` in the file and is not shifted by the viewer's time zone; headings use the long date without the year ("Tuesday, April 14"). First pitch and "Updated" are in the viewer's time zone. "Updated 10:00 AM CDT." when the update happened on the slate's date; otherwise it keeps its date: "Updated Nov 18, 12:13 PM EST." (the replay ran weeks after its game).
+
+**Home (`/`)**
+
+- Heading: in season the long date with "15 games. Updated 10:00 AM CDT." under it; on the replay "World Series Game 5", the headline, the replay label and the updated line. The Opening Day countdown sits above it while `site.json` turns it on.
+- Under a "Today's games" band ("Games" on the replay), the games grouped under "In progress", "Later today", "Final" and "Postponed" (postponed, cancelled or suspended), in that order, each sorted by first pitch. Empty groups don't show. "No games are scheduled for this date." when there are none.
+- One card per game, at least 360px wide (two across on a wide desktop, otherwise one); the whole card is a single link to `/game/{gamePk}`:
+  - top line: the status on the left (a lit white lamp and "Top 6th, 1 out" while live, the local first-pitch time before the game, "Final", or the stopped status) and the park on the right;
+  - two team rows: the nickname, the team's W–L record from the slate beside it (regular season only), the win chance as a mini plate in its tier colour, and the runs once the game has started (the losing score dimmed once final);
+  - a footer: the board's total runs line ("Total O/U 8.5") and its NRFI label ("NRFI 52%", or "YRFI 55%" as on the board); on a final game the four result lamps instead, the same picks and colours as the board but labelled only Winner, First 5, Total and NRFI (the full pick, such as "Winner Brewers", stays as screen-reader text), so the lamps and "Full game" fit one row; a postponed game shows no lamps; and "Full game" at the right;
+  - an accessible name that reads the card in one sentence: "Brewers at Rays, final, 4 to 1. Full game."
+- A card changes group when the slate says its game has moved on; keyboard focus stays on it.
+- Side rail, under a "Beat the Streak" band: "The best chances of a hit today." ("The best chances of a hit." on the replay), the top three picks (rank, name, "Brewers at Rays" linking to that game, the hit chance) and an "All picks" link.
+
+**Game (`/game/{gamePk}`)**
+
+- Heading: "Brewers at Rays" with the long date and the updated time under it in season; on the replay "World Series Game 5", the headline, the label and the updated line. "All games" (back to `/`) sits above the board.
+- The board, home run conditions, total runs, starting pitchers and lineups, with the live refresh above. The rail has "Other games" (each other game on the slate as one line, teams and score or first-pitch time, linking to its page; the status comes from the slate, fetched once; without it each line shows what `page.json` has) and then "Cut-off for every market". With no other games the list is left out.
+
+**Beat the Streak (`/beat-the-streak`)**
+
+- "Beat the Streak", the date (or the replay title) under it, and "Beat the Streak is MLB's free contest: pick a batter to get a hit on the days you play, and 57 correct picks in a row win the grand prize."
+- Every pick in `page.json`, ranked: name, team, "at Rays" or "vs Brewers" linking to that game, the hit chance, and once his game is final the batter's line, with the bat icon when he got a hit. "Picks appear once lineups are posted." when there are none.
+
+**404**: "Page not found." and a link to all games.
+
+## Rules the pages follow
+
+- The strong and watch cut-offs are the ones from the original Streamlit app (listed under "Cut-off for every market"). A value is judged by the whole percent it shows, so 17.54% that displays as 18% counts as 18%.
+- Yellow means only "strong": yellow numerals on a green plate. On the board and the cards, strong numbers are yellow, worth-watching numbers white, and low numbers dim green (`b-strong`, `b-watch`, `b-low`; plates with no cut-off are `b-plain`). In the tables, strong values are a yellow-on-green chip (`p-strong`), worth-watching values dark ink (`p-watch`), low values dark brown (`p-low`). Selection markers are white: the half-inning being played, the current page in the nav, and the live lamp. Yellow appears in exactly four other places: the home-run bar at 55 or more, keyboard focus rings on green areas, the brand mark's second base, and the two foul poles. Yellow text never sits on the dirt. A test checks every element against that list.
+- The infield: the page sides are grass (`--board`); the content column (`.infield`, max 1280px, from the nav to the footer) is infield dirt (`--dirt` #D9C3A0) with a 4px yellow foul pole down each edge. The nav, the board, the cards and the footer stay green. Section headings on the dirt are green bands with chalk text and a 3px chalk bottom line; row rules are `--rule`; bars run in chalked lanes. Text on the dirt uses `--ink`, `--board`, `--muted` and `--low`, all at least 4.5:1, which a test checks on every page.
+- The board's top line is the park and the date (or first pitch, or a stopped game's status), with a white lamp and "Live, bottom 5th, 2 outs" while the game is on. Then the line score (a plate per inning, at least nine, then R, H and E; X where the home team didn't bat in the last inning of a final), the season series strip, and the model numbers: Odds to win, First 5 winner and Total runs O/U (the away row shows the over and the home row the under for the `.5` line closest to 50%, the pair adding to 100), then the result lamps.
+- Result lamps show whether the model's pick came true. The pick is the likelier side on unrounded values: Winner, First 5 (away, home or tie), Total (Over or Under on the board's line), NRFI (or YRFI with the other side of the number). Exactly even is no pick and no lamp. Lamps are unlit before and during the game; on a final game green when the pick came true and red when it missed, with words for screen readers; no lamp where the result is `null`. A postponed, cancelled or suspended game (by its detailed state, before anything else) has no lamps at all.
+- Each team on the board: the record beside the nickname, the standing on two lines ("1st in the NL Central, 14 games up." then "35–17 in the division."; the second left out when the division record is missing), then the battery: "SP" from `page.json`, "C" from `/api/boxscore` ("C not announced" until the lineup is in), and their record together.
+- Starting pitchers: each team's starter, his line once the game has started (with "Started: [name]" when the API's starter isn't `page.json`'s), the stolen bases against the pitcher and the catcher this season, the 3+ to 7+ strikeout ladder with a bold K in `--ok` under each total reached once the game is final ("Reached 4 strikeouts." for screen readers), and the first-inning record.
+- Once a game is final, the lineup tables mark each batter prop that came true with a 14px icon in `--ok`: a bat for 1+ hit ("got a hit") and 2+ total bases ("two or more bases"), a firework burst for a homer ("homered"), home plate for an RBI, a base for a steal. The burst pops once (about 500 ms, scaling up from 60% as it fades in) when the lineups are drawn; the live refresh never redraws them, and there's no animation under `prefers-reduced-motion: reduce`. Check marks follow each total-runs line the game went over.
+- Home run conditions: the score bar's label and the score out of 100; an open-air park also shows temperature, humidity, dew point (the file's, or Magnus with the engine's constants), wind, elevation (the file's, or the park table from the engine's `weather.py`, rounded to 10 ft) and carry.
+- A probability that rounds to 0 shows as `<1%` and one that rounds to 100 as `>99%`.
+- Tables have captions and headers. On phones nine innings plus R, H and E fit at 390px; extra innings and wide lineups scroll inside their own focusable box. Scroll boxes only scroll sideways, and only when their table can't fit.
+- Text is added to the page as text, never as HTML. `_headers` sets a strict Content-Security-Policy: no inline scripts, no inline styles, and no request to any other host. Bar widths are set through the CSSOM (`el.style.width`), which the policy allows.
 
 ## Tests
 
@@ -175,15 +223,14 @@ python -m venv .venv
 .venv\Scripts\python -m pip install playwright
 .venv\Scripts\python -m playwright install chromium
 .venv\Scripts\python tests/test_site.py
+.venv\Scripts\python tests/test_routes.py
 node --test tests/worker.test.mjs
 ```
 
-The browser tests serve `public/` with the rules from `_headers` (there is no Worker in that server, so `/api/linescore`, `/api/boxscore` and `/api/series` are answered from `tests/fixtures/` with Playwright's `page.route`). The infield checks cover the backgrounds, the poles at 1440 and 390, the heading bands, a WCAG contrast check of every text on the dirt, and stray "null"/"undefined" text. The battery, the starter's lines, the series strip and their empty and failure states are checked against fixtures (real WS5 answers captured through `wrangler dev`, plus hand-written ones for no catcher yet, live lines, an opener, a tied series, sweeps, a season sweep, a winless team and postseason series). Chromium runs with classic scrollbars that take up space, as on Windows. The tests load the real `page.json` at desktop and phone width and compare every number on the page with the file and the fixtures (the expected values, including the O/U lines, the lamp picks and results, dew point, elevation and the line score, are worked out separately in the test). They also run an in-season file made up for the test (preview, live and final games, an 11-inning final, a home team that didn't bat in the 9th, postponed and suspended games, even picks, a YRFI pick, unknown results, a 500 and a timeout, open-air and dome parks, missing weather and starters), check polling with Playwright's clock, sweep the width from 360 to 1440px for stray scrollbars, and check the error messages. They save full-page screenshots to `tests/screens/`.
+- `test_site.py`: browser tests. `tests/serve.py` serves `public/` with the rules from `_headers` and the site's routing (`/game/{id}` -> `game.html`, other `/game` paths and unknown paths -> `404.html` with 404); the API is answered from `tests/fixtures/` with Playwright's `page.route`. Every page is checked for the name, the nav and `aria-current`, no "How the model works", the title, the security headers, same-origin requests, stray "null"/"undefined" text, contrast on the dirt, and the 360 to 1440px width sweep with classic scrollbars (as on Windows). The real `page.json` is checked at desktop and phone width against values worked out separately in the test; an in-season file made up for the test covers preview, live and final games, an 11-inning final, postponed and suspended games, even picks, YRFI, unknown results, failures and timeouts, and polling with Playwright's clock (the home page's slate refresh and the game page's line score). The rainout cards use the real 2026-05-23 slate. Screenshots of every page at 1440 and 390, the 404 page, and a 1x close-up of a lineup row with every icon go to `tests/screens/`.
+- `test_routes.py`: starts the pinned `wrangler dev` and checks every page URL, the 307 redirects, the 404 page for unknown and bad `/game` paths, the methods on `/game`, the assets at absolute paths, and that every HTML response (including the Worker's) carries every security header in `_headers`. It makes no request to the MLB Stats API.
+- `worker.test.mjs`: stubs `fetch`, the Cache API and the `ASSETS` binding, so it makes no network requests. `tests/fixtures/upstream-slate-*.json` are real schedule responses for 2026-04-14, 2026-05-23 (two rainouts) and 2026-10-28 (World Series Game 5); `slate-2026-05-23.json` and `slate-2026-10-28.json` are the Worker's own trims of them, used by the browser tests.
 
-The test servers are stopped as a whole process tree (on Windows the venv's `python.exe` starts the real interpreter as a child), and a run refuses to start if a test port is already in use, so a server left over from an earlier run can never answer for the wrong folder.
-
-`tests/fixtures/linescore-849799.json` is the Worker's real answer for WS5, captured through `npx wrangler dev`; its R totals (4 and 1) match page.json's results. `tests/fixtures/upstream-849799.json` is the raw MLB Stats API response the Worker tests trim.
-
-The Worker tests stub `fetch` and the Cache API, so they make no network requests.
+The test servers are stopped as a whole process tree (on Windows the venv's `python.exe`, and wrangler, start child processes), and a run refuses to start if a test port is already in use.
 
 Not affiliated with Major League Baseball.

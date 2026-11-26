@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MLB game: Diamond Metrics</title>
+<meta name="description" content="One MLB game, predicted from a Monte Carlo simulation: win chances, first five innings, totals, starter strikeouts, lineups and player props, with the live line score.">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#1F4A38">
+<meta property="og:title" content="MLB game: Diamond Metrics">
+<meta property="og:description" content="One MLB game, predicted from a Monte Carlo simulation: win chances, totals, strikeouts, lineups and player props.">
+<meta property="og:type" content="website">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/fonts/big-shoulders-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/libre-franklin-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body data-page="game">
+<a class="skip" href="#main">Skip to the predictions</a>
+
+<header class="top">
+  <nav class="wrap nav" aria-label="Main">
+    <a class="brand" href="/"><svg class="mark" viewBox="0 0 28 28" width="28" height="28" aria-hidden="true" focusable="false"><path d="M14 5 23 14 14 23 5 14Z" fill="none" stroke="#F4F5F0" stroke-width="2" stroke-linejoin="round"/><rect x="11.75" y="2.75" width="4.5" height="4.5" fill="#F2C12E" transform="rotate(45 14 5)"/></svg>Diamond Metrics</a>
+    <div class="links">
+      <a href="/" aria-current="page">Games</a>
+      <a href="/beat-the-streak">Beat the Streak</a>
+    </div>
+  </nav>
+</header>
+
+<div class="infield">
+  <main id="main" class="wrap">
+    <div id="app"><p class="msg">Loading predictions…</p></div>
+    <noscript><p class="msg">This page needs JavaScript to show the predictions.</p></noscript>
+  </main>
+</div>
+
+<footer>
+  <div class="wrap">
+    <p>Predictions come from simulating each game thousands of times. Probabilities, not guarantees, and not betting advice.</p>
+    <p>Not affiliated with Major League Baseball.</p>
+  </div>
+</footer>
+
+<script src="/app.js" defer></script>
+</body>
+</html>

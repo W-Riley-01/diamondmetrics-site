@@ -1,11 +1,13 @@
-// diamondmetrics-site Worker. Only /api/* reaches this script (assets.run_worker_first in wrangler.jsonc);
+// Diamond Metrics Worker. Only /api/*, /game and /game/* reach this script (assets.run_worker_first in wrangler.jsonc);
 // every other path is a static file served from public/ without running any code.
 //
+// GET /game/{gamePk}           the game page (public/game.html from the assets); any other /game path is the 404 page
 // GET /api/linescore/{gamePk}  the game's state and line score
 // GET /api/boxscore/{gamePk}   each team's starting pitcher (with his line) and starting catcher
 // GET /api/series/{gamePk}     the regular-season series between the two teams, and the postseason series
 // GET /api/standings/{gamePk}  each team's record and division standing going into the game
 // GET /api/battery/{gamePk}    each team's battery: record together this season, and stolen bases against each
+// GET /api/slate/{YYYY-MM-DD}  every game on a date: state, inning, runs and (regular season) each team's record
 // All from the MLB Stats API, trimmed to what the page shows. Nothing from upstream is passed through as it is.
 
 const API = 'https://statsapi.mlb.com/api/v1/';
@@ -56,6 +58,8 @@ async function getJSON(path) {
 const int = (x) => (typeof x === 'number' && Number.isFinite(x) ? x : null);
 const STATES = { Preview: 'preview', Live: 'live', Final: 'final' };
 const stateOf = (game) => STATES[game && game.status && game.status.abstractGameState] || 'preview';
+// A rainout is abstractGameState "Final" (codedGameState "D"), so a stopped game is told by its detailed state.
+const STOPPED = /^(Postponed|Cancelled|Suspended)/;
 const firstGame = (data) => (data && Array.isArray(data.dates) && data.dates[0] && Array.isArray(data.dates[0].games) ? data.dates[0].games[0] || null : null);
 const allGames = (data) => (data && Array.isArray(data.dates) ? data.dates.flatMap((d) => (d && Array.isArray(d.games) ? d.games : [])) : []);
 
@@ -349,14 +353,71 @@ async function battery(pk) {
   return { body, edge: ttl, browser: ttl };
 }
 
-const ROUTES = { linescore, boxscore, series, standings, battery };
+// ---------- /api/slate ----------
+// "2026-04-14" and a real calendar date (not 2026-02-30).
+export const validDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(s + 'T00:00:00Z'))
+  && new Date(s + 'T00:00:00Z').toISOString().slice(0, 10) === s;
+
+// One schedule game -> its slate entry. Records only for a regular-season game: in the postseason leagueRecord is
+// the series record (4-1 on WS5), not the season.
+export function slateGame(g) {
+  const ls = g.linescore || {};
+  const lsTeams = ls.teams || {};
+  const t = g.teams || {};
+  const regular = g.gameType === 'R';
+  const side = (s) => {
+    const rec = (t[s] && t[s].leagueRecord) || {};
+    const runs = int(lsTeams[s] && lsTeams[s].runs);
+    return { runs: runs !== null ? runs : int(t[s] && t[s].score), wins: regular ? int(rec.wins) : null, losses: regular ? int(rec.losses) : null };
+  };
+  return {
+    state: stateOf(g),
+    detail: detailOf(g),
+    inning: int(ls.currentInning),
+    half: typeof ls.inningState === 'string' ? ls.inningState.toLowerCase() : null,
+    outs: int(ls.outs),
+    away: side('away'),
+    home: side('home'),
+  };
+}
+
+// The schedule for a date -> { date, games: { gamePk: entry } }. A gamePk listed twice (a suspended game resumed the
+// same day) keeps the entry that isn't stopped.
+export function trimSlate(data, date) {
+  const games = {};
+  for (const g of allGames(data)) {
+    const pk = int(g && g.gamePk);
+    if (pk === null) continue;
+    const entry = slateGame(g);
+    const prev = games[pk];
+    if (!prev || (STOPPED.test(prev.detail) && !STOPPED.test(entry.detail))) games[pk] = entry;
+  }
+  return { date, games };
+}
+
+// 15 s at the edge (10 in the browser) while any game is live, a day once every game is over (final, postponed,
+// cancelled or suspended), 5 minutes otherwise, including a date with no games.
+export function slateTTL(body) {
+  const all = Object.values(body.games);
+  const stopped = (e) => STOPPED.test(e.detail);
+  if (all.some((e) => e.state === 'live' && !stopped(e))) return { edge: EDGE_TTL.live, browser: BROWSER_TTL.live };
+  if (all.length && all.every((e) => e.state === 'final' || stopped(e))) return { edge: EDGE_TTL.final, browser: BROWSER_TTL.final };
+  return { edge: EDGE_TTL.preview, browser: BROWSER_TTL.preview };
+}
+
+async function slate(date) {
+  const body = trimSlate(await getJSON('schedule?sportId=1&date=' + date + '&hydrate=linescore'), date);
+  return { body, ...slateTTL(body) };
+}
+
+const ROUTES = { linescore, boxscore, series, standings, battery, slate };
 
 // Cached: the stored copy keeps the edge lifetime in Cache-Control and the browser's max-age in its own header,
 // so a cache hit tells the browser the right max-age again.
-async function cached(name, pk, method, ctx) {
+async function cached(name, key, method, ctx) {
   const cache = caches.default;
-  const key = new Request('https://' + name + '.cache/' + pk);
-  const hit = await cache.match(key);
+  const req = new Request('https://' + name + '.cache/' + key);
+  const hit = await cache.match(req);
   if (hit) {
     const body = await hit.json();
     // Copies stored before X-Browser-Max-Age existed: use the browser lifetime for the stored game state, then 10.
@@ -365,7 +426,7 @@ async function cached(name, pk, method, ctx) {
   }
   let got;
   try {
-    got = await ROUTES[name](pk);
+    got = await ROUTES[name](key);
   } catch (e) {
     if (e instanceof Upstream) return error(502, 'upstream error', method);
     throw e;
@@ -374,17 +435,32 @@ async function cached(name, pk, method, ctx) {
   const stored = new Response(JSON.stringify(got.body), {
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'max-age=' + got.edge, 'X-Browser-Max-Age': String(got.browser) },
   });
-  const put = cache.put(key, stored);
+  const put = cache.put(req, stored);
   if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(put); else await put;
   return reply(got.body, 200, 'public, max-age=' + got.browser, method);
+}
+
+// /game/{1-8 digits}: game.html from the assets (the asset response carries the _headers rules). Any other /game path
+// is the 404 page with status 404. The 404 page is fetched without the browser's headers, so it is never a 304.
+async function gamePage(request, url, env) {
+  if (/^\/game\/\d{1,8}$/.test(url.pathname)) return env.ASSETS.fetch(new Request(new URL('/game', url), request));
+  const page = await env.ASSETS.fetch(new Request(new URL('/404', url), { method: request.method }));
+  return new Response(page.body, { status: 404, headers: page.headers });
 }
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
     const method = request.method;
+    const game = url.pathname === '/game' || url.pathname.startsWith('/game/');
+    if (!game && !url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
     if (method !== 'GET' && method !== 'HEAD') return error(405, 'method not allowed', method, { Allow: 'GET, HEAD' });
+    if (game) return gamePage(request, url, env);
+    const s = /^\/api\/slate\/([^/]+)$/.exec(url.pathname);
+    if (s) {
+      if (!validDate(s[1])) return error(400, 'date must be YYYY-MM-DD', method);
+      return cached('slate', s[1], method, ctx);
+    }
     const m = /^\/api\/(linescore|boxscore|series|standings|battery)\/([^/]+)$/.exec(url.pathname);
     if (!m) return error(404, 'not found', method);
     if (!/^\d{1,8}$/.test(m[2])) return error(400, 'gamePk must be 1 to 8 digits', method);

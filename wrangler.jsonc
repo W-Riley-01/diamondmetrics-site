@@ -1,4 +1,4 @@
-// diamondmetrics-site: static files from public/, plus a Worker script for /api/* only.
+// Diamond Metrics: static files from public/, plus a Worker script for /api/* and the game pages (/game/*).
 // The custom domains (diamondmetrics.dev, app.diamondmetrics.dev) are attached in the dashboard, so there are no routes here.
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
@@ -8,8 +8,13 @@
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
-    // Only the API runs the script; every other request is a static file, served with public/_headers.
-    "run_worker_first": ["/api/*"]
+    // html_handling stays the default (auto-trailing-slash): /beat-the-streak serves beat-the-streak.html, and
+    // /beat-the-streak.html and /beat-the-streak/ redirect (307) to it.
+    // Any path with no file gets public/404.html with status 404.
+    "not_found_handling": "404-page",
+    // The API and the game pages run the script; every other request is a static file, served with public/_headers.
+    // "/game" is here too, so the bare game shell (and /game.html, which redirects to /game) is a 404, not an empty page.
+    "run_worker_first": ["/api/*", "/game", "/game/*"]
   },
   // Both off since Nov 18 and must stay off: the site is only served on its custom domains.
   "workers_dev": false,

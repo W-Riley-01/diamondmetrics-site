@@ -1,10 +1,10 @@
 // Worker tests: node --test tests/worker.test.mjs
-// fetch and caches.default are stubbed, so nothing leaves this machine. Upstream answers come from tests/fixtures/
-// (real MLB Stats API responses for WS5, and a hand-written doubleheader schedule).
+// fetch, caches.default and the ASSETS binding are stubbed, so nothing leaves this machine. Upstream answers come from
+// tests/fixtures/ (real MLB Stats API responses for WS5 and three schedule dates, and a hand-written doubleheader).
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import worker, { trim, trimTeam, trimSeries, teamStanding, dayBefore, together, runningGame } from '../worker/index.js';
+import worker, { trim, trimTeam, trimSeries, teamStanding, dayBefore, together, runningGame, trimSlate, validDate } from '../worker/index.js';
 
 const fx = (name) => JSON.parse(readFileSync(new URL('./fixtures/' + name, import.meta.url), 'utf8'));
 const WS5 = fx('upstream-849799.json');
@@ -16,11 +16,13 @@ const WS5_PROBABLE = fx('upstream-game-probable-849799.json');
 const STANDINGS_2026 = fx('upstream-standings-2026.json');
 const LOGS = Object.fromEntries([694819, 661388, 656876, 689414].map((id) => [id, fx(`upstream-log-${id}.json`)]));
 const PEOPLE_WS5 = fx('upstream-people-ws5.json');
+// Real schedules: 15 regular-season finals; two rainouts among 14 finals; World Series Game 5.
+const SLATES = Object.fromEntries(['2026-04-14', '2026-05-23', '2026-10-28'].map((d) => [d, fx(`upstream-slate-${d}.json`)]));
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
 
 // Upstream by URL; a test can replace any entry.
-let routes, store, calls;
+let routes, store, calls, assetCalls;
 function realRoutes() {
   return [
     [/schedule\?sportId=1&hydrate=linescore&gamePk=849799$/, () => json(WS5)],
@@ -32,11 +34,13 @@ function realRoutes() {
     [/standings\?leagueId=103,104&season=2026&standingsTypes=regularSeason&hydrate=division$/, () => json(STANDINGS_2026)],
     [/people\/(\d+)\/stats\?stats=gameLog&group=(pitching|fielding)&season=2026&gameType=R,F,D,L,W$/, (url) => json(LOGS[Number(/people\/(\d+)\//.exec(url)[1])])],
     [/people\?personIds=694819,661388,656876,689414&hydrate=stats\(group=\[pitching,fielding\],type=\[season\],season=2026\)$/, () => json(PEOPLE_WS5)],
+    [/schedule\?sportId=1&date=(2026-04-14|2026-05-23|2026-10-28)&hydrate=linescore$/, (url) => json(SLATES[/date=([\d-]+)/.exec(url)[1]])],
   ];
 }
 beforeEach(() => {
   store = new Map();
   calls = [];
+  assetCalls = [];
   routes = realRoutes();
   globalThis.caches = {
     default: {
@@ -54,8 +58,19 @@ beforeEach(() => {
 const route = (re, fn) => routes.unshift([re, fn]);
 
 const ctx = { waitUntil: (p) => p };
-const env = { ASSETS: { fetch: async () => new Response('asset', { status: 200 }) } };
-const get = (path, method = 'GET') => worker.fetch(new Request('https://app.example' + path, { method }), env, ctx);
+// The assets: "asset:{path}" with the headers _headers would add, status 200, and every request recorded.
+const env = {
+  ASSETS: {
+    fetch: async (req) => {
+      const u = new URL(req.url);
+      assetCalls.push({ path: u.pathname, method: req.method, inm: req.headers.get('if-none-match') });
+      return new Response(req.method === 'HEAD' ? null : 'asset:' + u.pathname, {
+        status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "default-src 'none'; script-src 'self'", 'X-Frame-Options': 'DENY' },
+      });
+    },
+  },
+};
+const get = (path, method = 'GET', headers) => worker.fetch(new Request('https://app.example' + path, { method, headers }), env, ctx);
 
 function game(abstract, detailed, linescore) {
   return { dates: [{ games: [{ status: { abstractGameState: abstract, detailedState: detailed }, linescore }] }] };
@@ -90,7 +105,7 @@ test('linescore WS5: the trimmed shape, and nothing else from upstream', async (
   assert.ok(calls[0].opts.signal instanceof AbortSignal, 'the upstream request has a timeout signal');
 });
 
-test('all endpoints: gamePk must be 1 to 8 digits, and bad ids never reach upstream', async () => {
+test('all game endpoints: gamePk must be 1 to 8 digits, and bad ids never reach upstream', async () => {
   for (const ep of ['linescore', 'boxscore', 'series', 'standings', 'battery']) {
     for (const bad of ['abc', '123456789', '12a', '-1', '1.5']) {
       const res = await get(`/api/${ep}/${bad}`);
@@ -103,29 +118,35 @@ test('all endpoints: gamePk must be 1 to 8 digits, and bad ids never reach upstr
 });
 
 test('all endpoints: GET and HEAD only', async () => {
-  for (const ep of ['linescore', 'boxscore', 'series', 'standings', 'battery']) {
-    const head = await get(`/api/${ep}/849799`, 'HEAD');
-    assert.equal(head.status, 200, ep);
+  for (const path of ['/api/linescore/849799', '/api/boxscore/849799', '/api/series/849799', '/api/standings/849799', '/api/battery/849799', '/api/slate/2026-10-28']) {
+    const head = await get(path, 'HEAD');
+    assert.equal(head.status, 200, path);
     assert.equal(await head.text(), '');
     checkHeaders(head);
     for (const m of ['POST', 'PUT', 'DELETE', 'OPTIONS']) {
-      const res = await get(`/api/${ep}/849799`, m);
-      assert.equal(res.status, 405, ep + ' ' + m);
+      const res = await get(path, m);
+      assert.equal(res.status, 405, path + ' ' + m);
       assert.equal(res.headers.get('allow'), 'GET, HEAD');
       checkHeaders(res);
     }
   }
 });
 
-test('other /api paths are 404; anything else goes to the assets', async () => {
-  assert.equal((await get('/api/other')).status, 404);
-  assert.equal((await get('/api/linescore/1/extra')).status, 404);
-  assert.equal((await get('/api/boxscores/1')).status, 404);
-  const asset = await get('/index.html');
-  assert.equal(await asset.text(), 'asset');
+test('other /api paths are 404; anything that is not /api or /game goes to the assets untouched', async () => {
+  for (const p of ['/api/other', '/api/linescore/1/extra', '/api/boxscores/1', '/api/slate/', '/api/slate/2026-04-14/x', '/api/slates/2026-04-14']) {
+    const res = await get(p);
+    assert.equal(res.status, 404, p);
+    checkHeaders(res);
+  }
+  for (const p of ['/', '/index.html', '/beat-the-streak', '/games', '/gamer/1', '/data/page.json']) {
+    const asset = await get(p);
+    assert.equal(await asset.text(), 'asset:' + p, p);
+  }
+  assert.deepEqual(assetCalls.map((c) => c.path), ['/', '/index.html', '/beat-the-streak', '/games', '/gamer/1', '/data/page.json']);
+  assert.equal(calls.length, 0);
 });
 
-test('all endpoints: an unknown game is 404 and not cached', async () => {
+test('all game endpoints: an unknown game is 404 and not cached', async () => {
   // the boxscore endpoint upstream answers 200 with empty teams for unknown games; the schedule call decides
   route(/game\/99999999\/boxscore$/, () => json({ teams: { away: {}, home: {} } }));
   for (const ep of ['linescore', 'boxscore', 'series', 'standings', 'battery']) {
@@ -146,18 +167,19 @@ test('all endpoints: upstream error, bad JSON and timeout are 502 and not cached
   ];
   // each upstream call of each endpoint, one at a time
   const targets = [
-    ['linescore', /hydrate=linescore/], ['boxscore', /sportId=1&gamePk=849799$/], ['boxscore', /boxscore$/],
-    ['series', /hydrate=seriesStatus/], ['series', /gameType=R/],
-    ['standings', /hydrate=probablePitcher/], ['standings', /standings\?/],
-    ['battery', /hydrate=probablePitcher/], ['battery', /boxscore$/], ['battery', /people\/656876\/stats/], ['battery', /people\/689414\/stats/], ['battery', /people\?personIds/],
+    ['linescore/849799', /hydrate=linescore&gamePk/], ['boxscore/849799', /sportId=1&gamePk=849799$/], ['boxscore/849799', /boxscore$/],
+    ['series/849799', /hydrate=seriesStatus/], ['series/849799', /gameType=R/],
+    ['standings/849799', /hydrate=probablePitcher/], ['standings/849799', /standings\?/],
+    ['battery/849799', /hydrate=probablePitcher/], ['battery/849799', /boxscore$/], ['battery/849799', /people\/656876\/stats/], ['battery/849799', /people\/689414\/stats/], ['battery/849799', /people\?personIds/],
+    ['slate/2026-04-14', /date=2026-04-14/],
   ];
-  for (const [ep, re] of targets) {
+  for (const [path, re] of targets) {
     for (const b of bad) {
       routes = realRoutes();
       route(re, b);
       store.clear();
-      const res = await get(`/api/${ep}/849799`);
-      assert.equal(res.status, 502, ep + ' ' + re);
+      const res = await get(`/api/${path}`);
+      assert.equal(res.status, 502, path + ' ' + re);
       checkHeaders(res);
       assert.equal(res.headers.get('cache-control'), 'no-store');
       assert.equal(store.size, 0);
@@ -491,4 +513,164 @@ test('battery: no catcher yet (lineup not posted) means no catcher and no record
     home: { pitcher: null, catcher: null, together: null },
   });
   assert.ok(!calls.some((c) => /gameLog&group=fielding/.test(c.url)), 'no catcher log asked for');
+});
+
+// ======================= /api/slate =======================
+const ENTRY_KEYS = ['away', 'detail', 'half', 'home', 'inning', 'outs', 'state'];
+
+test('slate 2026-04-14 (real): every game, the trimmed shape, regular-season records, a day once all are final', async () => {
+  const res = await get('/api/slate/2026-04-14');
+  assert.equal(res.status, 200);
+  checkHeaders(res);
+  assert.equal(res.headers.get('cache-control'), 'public, max-age=86400');
+  assert.equal(store.get('https://slate.cache/2026-04-14').headers.get('cache-control'), 'max-age=86400');
+  const body = await res.json();
+  assert.deepEqual(Object.keys(body).sort(), ['date', 'games']);
+  assert.equal(body.date, '2026-04-14');
+  const up = SLATES['2026-04-14'].dates[0].games;
+  assert.equal(Object.keys(body.games).length, 15);
+  for (const g of up) {
+    const e = body.games[g.gamePk];
+    assert.deepEqual(Object.keys(e).sort(), ENTRY_KEYS, String(g.gamePk));
+    assert.deepEqual(Object.keys(e.away).sort(), ['losses', 'runs', 'wins']);
+    assert.equal(e.state, 'final');
+    assert.equal(e.detail, 'Final');
+    for (const s of ['away', 'home']) {
+      assert.deepEqual([e[s].runs, e[s].wins, e[s].losses], [g.linescore.teams[s].runs, g.teams[s].leagueRecord.wins, g.teams[s].leagueRecord.losses], g.gamePk + ' ' + s);
+    }
+  }
+  assert.deepEqual(body.games[824853].away, { runs: body.games[824853].away.runs, wins: 10, losses: 8 });
+  const raw = JSON.stringify(body);
+  assert.ok(!raw.includes('copyright') && !raw.includes('Yankees') && !raw.includes('venue'), 'nothing raw passed through');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=2026-04-14&hydrate=linescore');
+  assert.ok(calls[0].opts.signal instanceof AbortSignal, 'the upstream request has a timeout signal');
+});
+
+test('slate 2026-05-23 (real): a rainout is "Final" upstream; it keeps its Postponed detail and no runs', async () => {
+  const up = SLATES['2026-05-23'].dates[0].games.find((g) => g.gamePk === 823543);
+  assert.deepEqual([up.status.abstractGameState, up.status.codedGameState, up.status.detailedState, up.status.statusCode, up.status.reason, up.rescheduleGameDate],
+    ['Final', 'D', 'Postponed', 'DR', 'Rain', '2026-09-22'], 'the real response, as captured');
+  const res = await get('/api/slate/2026-05-23');
+  const body = await res.json();
+  assert.deepEqual(body.games[823543], {
+    state: 'final', detail: 'Postponed', inning: null, half: null, outs: null,
+    away: { runs: null, wins: 95, losses: 61 }, home: { runs: null, wins: 90, losses: 66 },
+  });
+  assert.equal(body.games[824840].detail, 'Postponed');
+  assert.equal(Object.keys(body.games).length, 16);
+  assert.equal(res.headers.get('cache-control'), 'public, max-age=86400', 'finals and rainouts: every game is over');
+});
+
+test('slate 2026-10-28 (real World Series): no records in the postseason (leagueRecord is the series, 4-1)', async () => {
+  assert.deepEqual(SLATES['2026-10-28'].dates[0].games[0].teams.away.leagueRecord.wins, 4);
+  const body = await (await get('/api/slate/2026-10-28')).json();
+  assert.deepEqual(body, {
+    date: '2026-10-28',
+    games: { 849799: { state: 'final', detail: 'Final', inning: 9, half: 'bottom', outs: 3, away: { runs: 4, wins: null, losses: null }, home: { runs: 1, wins: null, losses: null } } },
+  });
+});
+
+// A synthetic schedule game for the slate rules.
+const SG = (pk, abstract, detail, extra = {}) => ({ gamePk: pk, gameType: 'R', status: { abstractGameState: abstract, detailedState: detail },
+  teams: { away: { leagueRecord: { wins: 1, losses: 2 } }, home: { leagueRecord: { wins: 2, losses: 1 } } }, linescore: {}, ...extra });
+const day = (...games) => ({ dates: games.length ? [{ games }] : [] });
+
+test('slate: cache lifetimes (live 15 s / 10 s; every game over a day; otherwise, and no games, 5 minutes)', async () => {
+  const cases = [
+    ['live', day(SG(1, 'Final', 'Final'), SG(2, 'Live', 'In Progress')), 15, 10],
+    ['preview only', day(SG(1, 'Preview', 'Scheduled')), 300, 300],
+    ['final and preview', day(SG(1, 'Final', 'Final'), SG(2, 'Preview', 'Pre-Game')), 300, 300],
+    ['final and suspended', day(SG(1, 'Final', 'Final'), SG(2, 'Live', 'Suspended: Rain')), 86400, 86400],
+    ['postponed and cancelled', day(SG(1, 'Final', 'Postponed'), SG(2, 'Final', 'Cancelled')), 86400, 86400],
+    ['suspended and live', day(SG(1, 'Live', 'Suspended: Rain'), SG(2, 'Live', 'In Progress')), 15, 10],
+    ['no games', day(), 300, 300],
+  ];
+  for (const [label, data, edge, browser] of cases) {
+    store.clear();
+    route(/date=2026-06-01&/, () => json(data));
+    const res = await get('/api/slate/2026-06-01');
+    assert.equal(res.status, 200, label);
+    assert.equal(res.headers.get('cache-control'), 'public, max-age=' + browser, label);
+    assert.equal(store.get('https://slate.cache/2026-06-01').headers.get('cache-control'), 'max-age=' + edge, label);
+  }
+  assert.deepEqual(await (await get('/api/slate/2026-06-01')).json(), { date: '2026-06-01', games: {} });
+});
+
+test('slate: a cache hit skips upstream and sets the browser max-age again', async () => {
+  route(/date=2026-06-02&/, () => json(day(SG(1, 'Live', 'In Progress'))));
+  await get('/api/slate/2026-06-02');
+  assert.equal(calls.length, 1);
+  const hit = await get('/api/slate/2026-06-02');
+  assert.equal(calls.length, 1, 'served from the cache');
+  checkHeaders(hit);
+  assert.equal(hit.headers.get('cache-control'), 'public, max-age=10');
+});
+
+test('slate: the date must be a real YYYY-MM-DD date (400), and bad dates never reach upstream', async () => {
+  for (const bad of ['2026-4-14', '20260414', '2026-02-30', '2026-13-01', '2026-00-10', 'abc', '2026-04-14x', '849799', '2026-04-1%20']) {
+    const res = await get('/api/slate/' + bad);
+    assert.equal(res.status, 400, bad);
+    checkHeaders(res);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await res.json(), { error: 'date must be YYYY-MM-DD' });
+  }
+  assert.equal(calls.length, 0);
+  assert.ok(validDate('2024-02-29') && !validDate('2026-02-29'));
+});
+
+test('slate trim: live inning and runs, records only for gameType R, a gamePk listed twice keeps the entry that is not stopped', () => {
+  const live = SG(5, 'Live', 'In Progress', { linescore: { currentInning: 6, inningState: 'Top', outs: 1, teams: { away: { runs: 2 }, home: { runs: 3 } } } });
+  const susp = SG(5, 'Live', 'Suspended: Rain', { linescore: { currentInning: 6, inningState: 'Top', outs: 1, teams: { away: { runs: 2 }, home: { runs: 3 } } } });
+  for (const order of [[susp, live], [live, susp]]) {
+    assert.equal(trimSlate(day(...order), '2026-06-03').games[5].detail, 'In Progress');
+  }
+  assert.deepEqual(trimSlate(day(live), 'd').games[5], { state: 'live', detail: 'In Progress', inning: 6, half: 'top', outs: 1, away: { runs: 2, wins: 1, losses: 2 }, home: { runs: 3, wins: 2, losses: 1 } });
+  for (const t of ['S', 'E', 'F', 'D', 'L', 'W', 'A']) {
+    const e = trimSlate(day(SG(6, 'Preview', 'Scheduled', { gameType: t })), 'd').games[6];
+    assert.deepEqual([e.away.wins, e.away.losses, e.home.wins], [null, null, null], t);
+  }
+  // before first pitch: no runs; a score without a line score falls back to teams.score
+  assert.deepEqual(trimSlate(day(SG(7, 'Preview', 'Scheduled')), 'd').games[7].away.runs, null);
+  assert.equal(trimSlate(day(SG(8, 'Final', 'Final', { linescore: undefined, teams: { away: { score: 4 }, home: { score: 1 } } })), 'd').games[8].away.runs, 4);
+});
+
+// ======================= /game =======================
+test('/game/{1-8 digits}: the game page from the assets (/game), with the asset headers, the browser headers passed on', async () => {
+  for (const id of ['849799', '1', '12345678']) {
+    assetCalls = [];
+    const res = await get('/game/' + id, 'GET', { 'If-None-Match': '"abc"' });
+    assert.equal(res.status, 200, id);
+    assert.equal(await res.text(), 'asset:/game');
+    assert.equal(res.headers.get('content-security-policy'), "default-src 'none'; script-src 'self'", 'the _headers rules come with the asset');
+    assert.equal(res.headers.get('x-frame-options'), 'DENY');
+    assert.deepEqual(assetCalls, [{ path: '/game', method: 'GET', inm: '"abc"' }]);
+  }
+  assetCalls = [];
+  const head = await get('/game/849799', 'HEAD');
+  assert.equal(head.status, 200);
+  assert.equal(await head.text(), '');
+  assert.deepEqual(assetCalls.map((c) => [c.path, c.method]), [['/game', 'HEAD']]);
+  assert.equal(calls.length, 0, 'no upstream call');
+});
+
+test('/game, /game/ and any other /game path: the 404 page with status 404 and its headers, never a 304', async () => {
+  for (const p of ['/game', '/game/', '/game/abc', '/game/123456789', '/game/1/x', '/game/-1', '/game/1.5', '/game/849799/']) {
+    assetCalls = [];
+    const res = await get(p, 'GET', { 'If-None-Match': '"abc"' });
+    assert.equal(res.status, 404, p);
+    assert.equal(await res.text(), 'asset:/404', p);
+    assert.equal(res.headers.get('content-security-policy'), "default-src 'none'; script-src 'self'", p);
+    assert.deepEqual(assetCalls, [{ path: '/404', method: 'GET', inm: null }], p);
+  }
+});
+
+test('/game: GET and HEAD only', async () => {
+  for (const m of ['POST', 'PUT', 'DELETE', 'OPTIONS']) {
+    assetCalls = [];
+    const res = await get('/game/849799', m);
+    assert.equal(res.status, 405, m);
+    assert.equal(res.headers.get('allow'), 'GET, HEAD');
+    assert.equal(assetCalls.length, 0);
+  }
 });
